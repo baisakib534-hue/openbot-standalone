@@ -912,6 +912,23 @@ usePlatformTools({
   },
   providerExists: (id) => providerSpec(id) !== undefined,
   addAgent: async (actorId, input) => {
+    // Resolve the grants before anything is written: a name that matches no added server refuses
+    // the whole call, rather than leaving a coworker created and half-granted behind it.
+    const grantPlan: { ref: string }[] = [];
+    if (input.grants.length > 0) {
+      const servers = await pluginStore.listServers();
+      for (const serverId of input.grants) {
+        const server = servers.find((candidate) => candidate.id === serverId);
+        if (!server) {
+          throw new Error(
+            `There is no MCP server added here with the id "${serverId}". Add the server first, then create the coworker.`,
+          );
+        }
+        for (const tool of server.tools) {
+          grantPlan.push({ ref: `${serverId}/${tool.name}` });
+        }
+      }
+    }
     const actor = await actorFor(actorId);
     const agent = await agentProfileStore.create(actor, {
       name: input.name,
@@ -930,10 +947,12 @@ usePlatformTools({
       actorUserId: actorId,
       payload: { actor: by, name: input.name, visibility: input.visibility, via: "platform-tools" },
     });
-    for (const serverId of input.grants) {
-      await pluginStore.grant("mcp", serverId, agent.id, by);
+    // Grants are per tool — one row per `<serverId>/<toolName>` — so naming a server means
+    // granting every tool it currently lists, each through the grants table's own write.
+    for (const planned of grantPlan) {
+      await pluginStore.grant("mcp", planned.ref, agent.id, by);
     }
-    return { id: agent.id, name: agent.name };
+    return { id: agent.id, name: agent.name, grantedTools: grantPlan.length };
   },
 });
 const responsibilityStore = createResponsibilityStore(database, {

@@ -88,8 +88,9 @@ export type PlatformTools = {
   /**
    * Create a coworker through the agent profile store's `create` — the method POST /api/agents
    * calls — with no endpoint, so it runs in-server as a built-in Bot on the role text. `grants`
-   * names MCP servers to grant the new Bot through `PluginStore.grant`, the grants table's own
-   * write path.
+   * names MCP servers; the handler grants the new Bot every tool those servers currently list,
+   * one `PluginStore.grant` row per tool (`<serverId>/<toolName>` — the grants table's own shape
+   * and write path), and reports how many grants were written.
    */
   addAgent(
     actorId: string,
@@ -100,7 +101,7 @@ export type PlatformTools = {
       visibility: "public" | "private";
       grants: string[];
     },
-  ): Promise<{ id: string; name: string }>;
+  ): Promise<{ id: string; name: string; grantedTools: number }>;
 };
 
 let installed: PlatformTools | null = null;
@@ -540,9 +541,11 @@ export async function callTool(
           ? ` It runs on the deployment's model like every coworker${namedProvider ? `; "${namedProvider}" is registered, and selecting it is the deployment's BOT_PROVIDER setting, not one agent's field` : ""}.`
           : "";
       const grantNote =
-        grants.length > 0
-          ? ` It has been granted: ${grants.join(", ")}.`
-          : " It has no tool grants yet — grant them on the Plugins page.";
+        grants.length === 0
+          ? " It has no tool grants yet — grant them on the Plugins page."
+          : agent.grantedTools > 0
+            ? ` It has been granted ${agent.grantedTools} tool${agent.grantedTools === 1 ? "" : "s"} from: ${grants.join(", ")}.`
+            : ` The named servers (${grants.join(", ")}) have no listed tools yet, so no tool grants were written — refresh them on the Plugins page, then grant from there.`;
       return asResult(
         `${agent.name} is created (id: ${agent.id}) and can be talked to now.${grantNote}${modelNote}`,
       );

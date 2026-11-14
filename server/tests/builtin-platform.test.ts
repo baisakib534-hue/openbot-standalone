@@ -43,7 +43,7 @@ function stub(overrides: Partial<PlatformTools> = {}): {
     providerExists: (id) => id === "9router" || id === "openai",
     addAgent: async (_actorId, input) => {
       calls.push({ method: "addAgent", input });
-      return { id: "agent-new", name: input.name };
+      return { id: "agent-new", name: input.name, grantedTools: input.grants.length > 0 ? 2 : 0 };
     },
     ...overrides,
   };

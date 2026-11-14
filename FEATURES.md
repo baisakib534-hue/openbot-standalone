@@ -134,7 +134,9 @@ classified as **writes**:
 - *"Install this skill …"* (paste SKILL.md markdown), or *"Install the skill at <URL> for the
   whole deployment."*
 - *"Add a researcher agent that searches the web and writes cited briefs, and grant it the
-  weather server."* → approval → the coworker exists and answers in chat straight away. A
+  weather server."* → approval → the coworker exists and answers in chat straight away. Naming
+  a server in the ask grants the new Bot every tool that server currently lists (grants are
+  per tool underneath). A
   coworker runs on the deployment's model — provider/model are deployment settings
   (`BOT_PROVIDER`/`BOT_MODEL`), not per-agent fields; naming a provider in the ask makes the
   Bot check it is registered first.
