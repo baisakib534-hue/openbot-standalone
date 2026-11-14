@@ -184,6 +184,15 @@ A blank value is read as unset, which is what a compose file passing `${BOT_MODE
 when nobody chose a model. API keys never appear in the file: they arrive in the environment
 under the `key_variable` the provider row names.
 
+Custom OpenAI-compatible providers need no edit to this file and no code at all: both loaders
+also read an overlay — the `CUSTOM_PROVIDERS_JSON` environment variable, or a
+`providers.local.json` file beside this one (`CUSTOM_PROVIDERS_PATH` can point elsewhere) —
+whose rows name an endpoint directly (`base_url`, `key_variable`, `default_model`, `api:
+"chat"`). Overlay providers register alongside the three built-ins, can be named by
+`BOT_PROVIDER`, by a Bot's row in the overlay's own `bots` section, and by the platform-tools
+`add_custom_provider` tool. `shared/providers.local.example.json` is a worked example, and
+FEATURES.md walks through all three ways of adding one.
+
 Adding a Bot in any language is adding one `bots` entry — `"agent-java": { "provider":
 "anthropic", "model": "claude-sonnet-4-5" }` — after which that Bot resolves its model the same
 way everything else does. A row that names a provider no `providers` entry exists for, or leaves a

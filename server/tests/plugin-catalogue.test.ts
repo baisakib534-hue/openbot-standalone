@@ -105,7 +105,7 @@ describe("which servers this deployment will talk to", () => {
         // First-party and in-process: there is no host outside this process to reach, so the
         // https requirement below does not apply. Asserted positively instead, so this branch
         // cannot quietly become a loophole for a future entry that DOES dial a real host.
-        expect(entry.host).toBe("builtin://routines");
+        expect(entry.host.startsWith("builtin://")).toBe(true);
       } else {
         expect(entry.host.startsWith("https://")).toBe(true);
       }
@@ -294,6 +294,37 @@ describe("Routines", () => {
       "brand-new-tool",
     ]) {
       expect(classifyTool(entry, name, false)).toBe("write");
+    }
+  });
+});
+
+describe("Platform Tools", () => {
+  const entry = catalogueEntry("platform-tools");
+
+  test("is in the catalogue and resolves to its own builtin address", () => {
+    expect(entry).not.toBeNull();
+    expect(resolveServerUrl("platform-tools")?.url).toBe(
+      "builtin://platform-tools",
+    );
+  });
+
+  test("has no credential, because there is nothing to authenticate to", () => {
+    expect(entry?.auth.kind).toBe("builtin");
+  });
+
+  test("is reached through the builtin platform transport, not a vendor", () => {
+    expect(entry?.transport).toBe("builtin-platform");
+  });
+
+  test("pins the exact write list: every one of the four tools is a write", () => {
+    expect(entry?.writeTools).toEqual([
+      "add_mcp_server",
+      "install_skill",
+      "add_custom_provider",
+      "add_agent",
+    ]);
+    for (const name of entry?.writeTools ?? []) {
+      expect(classifyTool(entry, name, true)).toBe("write");
     }
   });
 });

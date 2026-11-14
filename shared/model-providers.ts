@@ -19,6 +19,16 @@
  * never appear in the file — they arrive in the environment under the `key_variable` the provider
  * row names.
  *
+ * CUSTOM PROVIDERS ARE DATA TOO. A deployment may register extra OpenAI-compatible providers
+ * without editing this module or the JSON: an overlay read from `CUSTOM_PROVIDERS_JSON` (an inline
+ * JSON object) and/or a `providers.local.json` file beside `model-providers.json` (its path may be
+ * named by `CUSTOM_PROVIDERS_PATH`). Each overlay row names an endpoint directly — `base_url`,
+ * not a variable — plus the `key_variable` its key arrives in, a `default_model`, and an `api`
+ * style (only `"chat"`, OpenAI-compatible chat completions, for now). Overlay rows are validated
+ * with the same strictness as the base file, may not reuse a built-in id, and overlay `bots`
+ * entries may name overlay providers. With no overlay configured, nothing changes: the registry
+ * is exactly the three built-in rows, which is what the tests pin.
+ *
  * Facts only. Which provider a Bot can DRIVE is that Bot's own decision, beside the code that
  * loads its SDK: this module knows Google exists and what its key is called, and `agent-mastra`
  * still refuses it because it loads no Google module. Keeping the two apart is what lets a new
@@ -44,7 +54,8 @@ export const PROVIDER_IDS = ["openai", "anthropic", "google"] as const;
 export type ModelProviderId = (typeof PROVIDER_IDS)[number];
 
 export type ProviderSpec = {
-  readonly id: ModelProviderId;
+  /** A built-in id, or a custom provider's id from the overlay — hence a plain string. */
+  readonly id: string;
   /** How the provider is named in an error message. */
   readonly label: string;
   /** The environment variable its API key arrives in. */
@@ -53,6 +64,16 @@ export type ProviderSpec = {
   readonly baseUrlVariable: string;
   /** What a Bot uses when it is told a provider and no model. */
   readonly defaultModel: string;
+  /**
+   * The endpoint itself, for a custom provider. Built-in rows name a variable instead, because
+   * their endpoints are the vendor's own; a custom provider IS an endpoint, so the row carries it.
+   */
+  readonly baseUrl?: string;
+  /**
+   * How the endpoint is spoken to. Only `"chat"` (OpenAI-compatible chat completions) exists for
+   * custom providers today; built-in rows leave it unset and are driven by their own SDKs.
+   */
+  readonly api?: string;
 };
 
 /** A row as `model-providers.json` writes it: snake_case, because every language reads it. */
@@ -74,6 +95,276 @@ type SpecFile = {
   readonly bots?: Readonly<Record<string, SpecBotRow | undefined>>;
 };
 
+/** A custom-provider row as an overlay writes it: it names its endpoint, not a variable for one. */
+type CustomProviderRow = {
+  readonly label?: unknown;
+  readonly base_url?: unknown;
+  readonly key_variable?: unknown;
+  readonly base_url_variable?: unknown;
+  readonly default_model?: unknown;
+  readonly api?: unknown;
+};
+
+type OverlayFile = {
+  readonly providers?: Readonly<Record<string, CustomProviderRow | undefined>>;
+  readonly bots?: Readonly<Record<string, SpecBotRow | undefined>>;
+};
+
+/** What one overlay source contributes, before sources are merged. */
+export type CustomProvidersOverlay = {
+  readonly providers: readonly ProviderSpec[];
+  readonly bots: Readonly<Record<string, { provider: string; model: string }>>;
+};
+
+function failOverlay(source: string, problem: string): never {
+  throw new Error(`${source}: ${problem}`);
+}
+
+/** Digits may lead: the canonical custom provider is `9router`, a name nobody gets to re-spell. */
+const CUSTOM_PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+const ENV_VARIABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** Names an overlay id may not take: object-prototype members the registries already refuse. */
+const RESERVED_PROVIDER_IDS = new Set([
+  "constructor",
+  "prototype",
+  "tostring",
+  "valueof",
+  "hasownproperty",
+]);
+
+function requireOverlayText(
+  source: string,
+  value: unknown,
+  where: string,
+): string {
+  if (typeof value !== "string" || !value.trim()) {
+    failOverlay(source, `${where} must be a non-empty string.`);
+  }
+  return value;
+}
+
+/**
+ * One overlay row, checked. A bad row stops the process at startup naming the row, exactly as a
+ * bad base row does — a provider registered with a typo'd endpoint or a missing key variable is
+ * a deployment mistake its author should meet before the first model call, not during it.
+ */
+export function customProviderFromRow(
+  source: string,
+  id: string,
+  row: CustomProviderRow | undefined,
+): ProviderSpec {
+  if (!CUSTOM_PROVIDER_ID_PATTERN.test(id) || RESERVED_PROVIDER_IDS.has(id)) {
+    failOverlay(
+      source,
+      `providers.${id} is not a usable provider id (lowercase letters, digits and hyphens).`,
+    );
+  }
+  if ((PROVIDER_IDS as readonly string[]).includes(id)) {
+    failOverlay(
+      source,
+      `providers.${id} redefines a built-in provider; pick a different id.`,
+    );
+  }
+  if (!row || typeof row !== "object") {
+    failOverlay(source, `providers.${id} must be an object.`);
+  }
+  const baseUrl = requireOverlayText(source, row.base_url, `providers.${id}.base_url`);
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl);
+  } catch {
+    failOverlay(source, `providers.${id}.base_url is not a URL: ${baseUrl}`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    failOverlay(source, `providers.${id}.base_url must be an http(s) URL.`);
+  }
+  const keyVariable = requireOverlayText(
+    source,
+    row.key_variable,
+    `providers.${id}.key_variable`,
+  );
+  if (!ENV_VARIABLE_PATTERN.test(keyVariable)) {
+    failOverlay(
+      source,
+      `providers.${id}.key_variable is not an environment variable name: ${keyVariable}`,
+    );
+  }
+  // The endpoint override variable is derived from the id unless the row names one, so a custom
+  // provider answers to the same "variable names the endpoint" shape the built-in rows use. An id
+  // that leads with a digit (`9router`) derives a name no shell would accept, so it is prefixed.
+  const derived = `${id.toUpperCase().replace(/-/g, "_")}_BASE_URL`;
+  const baseUrlVariable =
+    row.base_url_variable === undefined
+      ? /^[0-9]/.test(derived)
+        ? `PROVIDER_${derived}`
+        : derived
+      : requireOverlayText(
+          source,
+          row.base_url_variable,
+          `providers.${id}.base_url_variable`,
+        );
+  if (!ENV_VARIABLE_PATTERN.test(baseUrlVariable)) {
+    failOverlay(
+      source,
+      `providers.${id}.base_url_variable is not an environment variable name: ${baseUrlVariable}`,
+    );
+  }
+  const api = row.api === undefined ? "chat" : row.api;
+  if (api !== "chat") {
+    failOverlay(
+      source,
+      `providers.${id}.api must be "chat" (OpenAI-compatible chat completions); other styles are not supported for custom providers.`,
+    );
+  }
+  return {
+    id: id as ModelProviderId,
+    label: requireOverlayText(source, row.label, `providers.${id}.label`),
+    keyVariable,
+    baseUrlVariable,
+    defaultModel: requireOverlayText(
+      source,
+      row.default_model,
+      `providers.${id}.default_model`,
+    ),
+    baseUrl,
+    api,
+  };
+}
+
+/**
+ * Parse one overlay source (the `CUSTOM_PROVIDERS_JSON` value, or a providers file's text).
+ *
+ * Exported so the parsing is testable without reloading this module: module load reads the real
+ * environment once, which is the behaviour a deployment wants and the behaviour a test cannot
+ * re-run in-process.
+ */
+export function parseCustomProvidersOverlay(
+  text: string,
+  source: string,
+): CustomProvidersOverlay {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    failOverlay(source, "is not valid JSON.");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    failOverlay(source, "must hold a JSON object.");
+  }
+  const overlay = parsed as OverlayFile;
+  const providers: ProviderSpec[] = [];
+  for (const [id, row] of Object.entries(overlay.providers ?? {})) {
+    providers.push(customProviderFromRow(source, id, row));
+  }
+  const bots: Record<string, { provider: string; model: string }> = {};
+  for (const [botId, entry] of Object.entries(overlay.bots ?? {})) {
+    if (!entry || typeof entry !== "object") {
+      failOverlay(source, `bots.${botId} must be an object.`);
+    }
+    bots[botId] = {
+      provider: requireOverlayText(source, entry.provider, `bots.${botId}.provider`),
+      model: requireOverlayText(source, entry.model, `bots.${botId}.model`),
+    };
+  }
+  return { providers, bots };
+}
+
+/** Where the overlay file lives: the path the environment names, else beside the base spec. */
+export function customProvidersFilePath(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): string {
+  const named = env.CUSTOM_PROVIDERS_PATH?.trim();
+  if (named) return named;
+  try {
+    const dir = import.meta.dir;
+    if (dir) return `${dir}/providers.local.json`;
+  } catch {
+    // Not a runtime that knows where this module lives; the env path is the only file source.
+  }
+  return "providers.local.json";
+}
+
+/**
+ * The overlay this process runs with: file first, `CUSTOM_PROVIDERS_JSON` over it, so an
+ * environment can restate one provider without restating them all. Absent both, an empty overlay
+ * — the registry stays the three built-in rows and nothing about the base file's checks changes.
+ *
+ * A file that exists but does not parse stops startup like a bad base row; a file that does not
+ * exist is simply no overlay, because the file is how a deployment opts in.
+ */
+function readOverlay(
+  env: Readonly<Record<string, string | undefined>>,
+): CustomProvidersOverlay {
+  const merged: ProviderSpec[] = [];
+  const byId = new Map<string, ProviderSpec>();
+  let bots: Record<string, { provider: string; model: string }> = {};
+  const absorb = (overlay: CustomProvidersOverlay) => {
+    for (const spec of overlay.providers) {
+      if (!byId.has(spec.id)) merged.push(spec);
+      byId.set(spec.id, spec);
+    }
+    bots = { ...bots, ...overlay.bots };
+  };
+
+  let fileText: string | undefined;
+  try {
+    // Required lazily: this module is imported in places where node:fs may not exist at all
+    // (bundled front-ends read the base spec through Vite), and an overlay file is a server-side
+    // deployment fact. Bun and Node both resolve this fine where it matters.
+    const { readFileSync } = require("node:fs") as typeof import("node:fs");
+    fileText = readFileSync(customProvidersFilePath(env), "utf-8");
+  } catch {
+    fileText = undefined;
+  }
+  if (fileText !== undefined) {
+    absorb(parseCustomProvidersOverlay(fileText, customProvidersFilePath(env)));
+  }
+  const inline = env.CUSTOM_PROVIDERS_JSON?.trim();
+  if (inline) {
+    absorb(parseCustomProvidersOverlay(inline, "CUSTOM_PROVIDERS_JSON"));
+  }
+  return { providers: merged.map((spec) => byId.get(spec.id) ?? spec), bots };
+}
+
+/**
+ * Add or replace one provider in the overlay file, through the same validation a load applies.
+ *
+ * This is the write half of the overlay store — the platform-tools `add_custom_provider` tool
+ * calls it — so a provider a Bot registers is a provider the next load validates identically.
+ * Returns the path written. Other overlay sources (the env JSON) are untouched and still win for
+ * any id they also name, because env-over-file is this registry's standing order.
+ */
+export function upsertCustomProviderFile(
+  spec: Omit<ProviderSpec, "baseUrlVariable"> & { baseUrlVariable?: string },
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): string {
+  const { readFileSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+  const path = customProvidersFilePath(env);
+  let current: OverlayFile = {};
+  try {
+    const text = readFileSync(path, "utf-8");
+    const parsed: unknown = JSON.parse(text);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      current = parsed as OverlayFile;
+    }
+  } catch {
+    current = {};
+  }
+  // Validate the row as a load would, before it is written where a load will find it.
+  const row: CustomProviderRow = {
+    label: spec.label,
+    base_url: spec.baseUrl,
+    key_variable: spec.keyVariable,
+    base_url_variable: spec.baseUrlVariable,
+    default_model: spec.defaultModel,
+    api: spec.api ?? "chat",
+  };
+  customProviderFromRow(path, spec.id, row);
+  const providers = { ...(current.providers ?? {}), [spec.id]: row };
+  writeFileSync(path, `${JSON.stringify({ ...current, providers }, null, 2)}\n`, "utf-8");
+  return path;
+}
+
 function fail(problem: string): never {
   throw new Error(`shared/model-providers.json: ${problem}`);
 }
@@ -93,12 +384,13 @@ function requireText(value: unknown, where: string): string {
  * with the key they got wrong, not send one Bot to a model named by a typo.
  */
 function readSpec(): {
-  providers: Record<ModelProviderId, ProviderSpec>;
-  bots: Record<string, { provider: ModelProviderId; model: string }>;
+  providers: Record<string, ProviderSpec>;
+  bots: Record<string, { provider: string; model: string }>;
+  customProviderIds: readonly string[];
 } {
   const spec = specJson as SpecFile;
 
-  const providers = {} as Record<ModelProviderId, ProviderSpec>;
+  const providers: Record<string, ProviderSpec> = {};
   for (const id of PROVIDER_IDS) {
     const row = spec.providers?.[id];
     if (!row) fail(`providers is missing its ${id} row.`);
@@ -125,28 +417,62 @@ function readSpec(): {
     }
   }
 
-  const bots: Record<string, { provider: ModelProviderId; model: string }> = {};
-  for (const [botId, entry] of Object.entries(spec.bots ?? {})) {
-    if (!entry) fail(`bots.${botId} must be an object.`);
-    const provider = requireText(entry.provider, `bots.${botId}.provider`);
-    if (!(PROVIDER_IDS as readonly string[]).includes(provider)) {
-      fail(
-        `bots.${botId}.provider is ${JSON.stringify(provider)}, not one of ${PROVIDER_IDS.join(", ")}.`,
-      );
-    }
-    bots[botId] = {
-      provider: provider as ModelProviderId,
-      model: requireText(entry.model, `bots.${botId}.model`),
-    };
+  /*
+   * The custom-provider overlay, read after the base rows so its ids join the set a `bots` entry
+   * may name. The base file's own rows were checked against PROVIDER_IDS alone above, on purpose:
+   * a custom provider belongs to the overlay sources, never smuggled into the contract file.
+   */
+  const overlay = readOverlay(process.env);
+  for (const custom of overlay.providers) {
+    providers[custom.id] = custom;
   }
+  const allProviderIds = Object.keys(providers);
 
-  return { providers, bots };
+  const bots: Record<string, { provider: string; model: string }> = {};
+  const absorbBots = (
+    entries: Readonly<Record<string, SpecBotRow | undefined>>,
+    source: string,
+  ) => {
+    for (const [botId, entry] of Object.entries(entries)) {
+      if (!entry) fail(`${source}bots.${botId} must be an object.`);
+      const provider = requireText(entry.provider, `${source}bots.${botId}.provider`);
+      if (!allProviderIds.includes(provider)) {
+        fail(
+          `${source}bots.${botId}.provider is ${JSON.stringify(provider)}, not one of ${allProviderIds.join(", ")}.`,
+        );
+      }
+      bots[botId] = {
+        provider,
+        model: requireText(entry.model, `${source}bots.${botId}.model`),
+      };
+    }
+  };
+  absorbBots(spec.bots ?? {}, "");
+  absorbBots(overlay.bots, "overlay ");
+
+  return {
+    providers,
+    bots,
+    customProviderIds: overlay.providers.map((custom) => custom.id),
+  };
 }
 
-const { providers: SPEC_PROVIDERS, bots: BOT_ENTRIES } = readSpec();
+const {
+  providers: SPEC_PROVIDERS,
+  bots: BOT_ENTRIES,
+  customProviderIds: CUSTOM_IDS,
+} = readSpec();
 
-export const MODEL_PROVIDERS: Record<ModelProviderId, ProviderSpec> =
-  SPEC_PROVIDERS;
+export const MODEL_PROVIDERS: Record<string, ProviderSpec> = SPEC_PROVIDERS;
+
+/** The custom provider ids this process loaded from the overlay (empty when none is configured). */
+export const CUSTOM_PROVIDER_IDS: readonly string[] = CUSTOM_IDS;
+
+/** Every provider id the registry answers for: the built-ins, then the custom overlay's. */
+export const ALL_PROVIDER_IDS: readonly string[] = [
+  ...PROVIDER_IDS,
+  ...CUSTOM_IDS,
+];
 
 /**
  * The provider somebody configured, or nothing if they named one nobody has heard of.
@@ -167,7 +493,7 @@ export function providerSpec(
 ): ProviderSpec | undefined {
   const normalized = provider?.trim().toLowerCase() || "openai";
   return Object.hasOwn(MODEL_PROVIDERS, normalized)
-    ? MODEL_PROVIDERS[normalized as ModelProviderId]
+    ? MODEL_PROVIDERS[normalized]
     : undefined;
 }
 
@@ -306,8 +632,12 @@ export function keyIsRequired(
   provider: string | undefined,
   baseUrl: string | undefined,
 ): boolean {
-  const named =
-    providerSpec(provider)?.id === "openai" && Boolean(baseUrl?.trim());
+  const spec = providerSpec(provider);
+  // A custom provider is an endpoint somebody named, like the OpenAI case below: whether it
+  // demands a key is the endpoint's own policy, and a caller that needs a string to construct
+  // its client gets the placeholder from `apiKeyOrPlaceholder`.
+  if (spec?.baseUrl) return false;
+  const named = spec?.id === "openai" && Boolean(baseUrl?.trim());
   return !named;
 }
 

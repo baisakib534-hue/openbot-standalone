@@ -262,18 +262,27 @@ export async function resolveModelApiKey(input: {
   provider: "openai" | "anthropic";
   keyId: string;
   environment: Record<string, string | undefined>;
+  /**
+   * The variable a custom provider's key arrives in. When set, the key is environment-only:
+   * the stored credential belongs to the tenant package's own provider and key id, and reading
+   * it for an endpoint it was never stored for would spend the wrong key at the wrong host.
+   */
+  keyVariable?: string;
 }) {
-  const stored = await input.reader.readModelSecret({
-    provider: input.provider,
-    keyId: input.keyId,
-  });
-  if (stored) {
-    return decryptSecret(input.encryptionKey, stored.encryptedValue);
+  if (!input.keyVariable) {
+    const stored = await input.reader.readModelSecret({
+      provider: input.provider,
+      keyId: input.keyId,
+    });
+    if (stored) {
+      return decryptSecret(input.encryptionKey, stored.encryptedValue);
+    }
   }
 
   const environmentKey =
     input.environment[
-      input.provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"
+      input.keyVariable ??
+        (input.provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY")
     ]?.trim();
   return environmentKey || null;
 }

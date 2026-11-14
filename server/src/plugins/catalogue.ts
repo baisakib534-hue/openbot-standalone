@@ -328,6 +328,32 @@ export const CATALOGUE: readonly CatalogueEntry[] = Object.freeze([
     ]),
     docsUrl: "https://github.com/CopilotKit/OpenBot/blob/main/docs/routines.md",
   },
+  {
+    key: "platform-tools",
+    title: "Platform Tools",
+    vendor: "OpenBot",
+    summary:
+      "Deployment changes a Bot can make when an administrator asks: add an MCP server, install a skill, register a custom model provider, create a coworker.",
+    /*
+     * First-party and in-process, like Routines, and in the catalogue for the same reason — the
+     * catalogue is where a deployment decides WHICH Bots may do WHAT — with the stakes one level
+     * up: these tools change the deployment itself rather than one person's routines. Every one of
+     * the four is a write, the transport refuses any actor who does not administer the deployment,
+     * and each call still passes the grant, the policy engine, the approval gate and the audit
+     * trail in `PluginStore.callTool` before it reaches a store.
+     */
+    host: "builtin://platform-tools",
+    path: "/",
+    transport: "builtin-platform",
+    auth: Object.freeze({ kind: "builtin" }),
+    writeTools: Object.freeze([
+      "add_mcp_server",
+      "install_skill",
+      "add_custom_provider",
+      "add_agent",
+    ]),
+    docsUrl: "https://github.com/CopilotKit/OpenBot/blob/main/FEATURES.md",
+  },
 ]);
 
 const BY_KEY = new Map(CATALOGUE.map((entry) => [entry.key, entry]));

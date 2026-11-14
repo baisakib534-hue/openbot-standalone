@@ -162,6 +162,7 @@ import {
   intelligenceChannelMappings,
   responsibilityRuns,
   routineRuns,
+  users,
 } from "./db/schema";
 import { createDeliveryRouter, DELIVERY_WORK_KINDS } from "./delivery/router";
 import {
@@ -198,6 +199,11 @@ import { createPasswordStore } from "./passwords/store";
 import { createOnboardingStore } from "./people/onboarding";
 import { createPeopleStore } from "./people/store";
 import { createAccountModeSwitch } from "./plugins/account-mode";
+import {
+  providerSpec,
+  upsertCustomProviderFile,
+} from "../../shared/model-providers";
+import { usePlatformTools } from "./plugins/builtin-platform";
 import { useRoutineTools } from "./plugins/builtin-routines";
 import { useComposioClient } from "./plugins/composio";
 import { createComposioClient } from "./plugins/composio-adapter";
@@ -823,6 +829,113 @@ if (composio) {
  */
 const routineStore = createRoutineStore(database);
 useRoutineTools(routineStore);
+
+/*
+ * Platform Tools, and the one moment its tools are told what to act on.
+ *
+ * The same module-level installation as Routines, for the same reason. The handlers are the
+ * stores' own methods — the ones the administrator's routes call — assembled here because this is
+ * the place that owns building them: `addCustomServer` and `installSkill` off the plugin store,
+ * `create` off the agent profile store, the credential admin service for an env-var token, and
+ * the providers overlay writer from the shared loader. The transport itself checks the actor
+ * administers the deployment before any of these run; `actorFor` is referenced from inside the
+ * closures because it is defined further down, and by the time a tool call can happen the module
+ * has long finished evaluating.
+ */
+const platformCredentialAdmin = createCredentialAdminService(
+  config.keyEncryptionKey,
+  credentialStore,
+  createAuditStore(database),
+);
+const platformActorEmail = async (actorId: string): Promise<string> => {
+  const [row] = await database
+    .select({ email: users.email })
+    .from(users)
+    .where(eq(users.id, actorId))
+    .limit(1);
+  return row?.email ?? actorId;
+};
+usePlatformTools({
+  actorIsAdmin: async (actorId) =>
+    (await actorFor(actorId)).role === "admin",
+  actorEmail: platformActorEmail,
+  addMcpServer: async (actorId, input) => {
+    let credentialId = input.credentialId;
+    if (!credentialId && input.authEnvVariable) {
+      const value = process.env[input.authEnvVariable]?.trim();
+      if (!value) {
+        throw new Error(
+          `The environment variable ${input.authEnvVariable} is not set, so there is no token to store for this server.`,
+        );
+      }
+      const created = await platformCredentialAdmin.create({
+        kind: "mcp",
+        provider: input.id,
+        keyId: "token",
+        metadata: {},
+        plaintext: value,
+        actorUserId: actorId,
+      });
+      credentialId = created.id;
+    }
+    const server = await pluginStore.addCustomServer({
+      id: input.id,
+      title: input.title,
+      url: input.url,
+      ...(credentialId ? { credentialId } : {}),
+      by: await platformActorEmail(actorId),
+    });
+    return { id: server.id, title: server.title, toolCount: server.tools.length };
+  },
+  installSkill: async (actorId, input) => {
+    await pluginStore.installSkill({
+      slug: input.slug,
+      title: input.title,
+      summary: input.summary,
+      instructions: input.instructions,
+      ownerUserId: input.ownerUserId,
+      ...(input.tools === undefined ? {} : { tools: input.tools }),
+      by: await platformActorEmail(actorId),
+    });
+    return { slug: input.slug };
+  },
+  addCustomProvider: async (input) => {
+    const path = upsertCustomProviderFile({
+      id: input.id,
+      label: input.label,
+      baseUrl: input.baseUrl,
+      keyVariable: input.keyVariable,
+      defaultModel: input.defaultModel,
+      api: "chat",
+    });
+    return { id: input.id, path };
+  },
+  providerExists: (id) => providerSpec(id) !== undefined,
+  addAgent: async (actorId, input) => {
+    const actor = await actorFor(actorId);
+    const agent = await agentProfileStore.create(actor, {
+      name: input.name,
+      title: input.title,
+      roleDescription: input.role,
+      visibility: input.visibility,
+      // No endpoint: the role text is what this coworker runs on, exactly as POST /api/agents
+      // passes it for an endpoint-less create.
+      systemPrompt: input.role,
+    });
+    const by = await platformActorEmail(actorId);
+    await recordAuditEvent(bootAuditStore, {
+      eventType: "bot.created",
+      targetType: "bot",
+      targetId: agent.id,
+      actorUserId: actorId,
+      payload: { actor: by, name: input.name, visibility: input.visibility, via: "platform-tools" },
+    });
+    for (const serverId of input.grants) {
+      await pluginStore.grant("mcp", serverId, agent.id, by);
+    }
+    return { id: agent.id, name: agent.name };
+  },
+});
 const responsibilityStore = createResponsibilityStore(database, {
   resolveTarget: async (ownerUserId, agentId, channelId) => {
     const actor = await actorFor(ownerUserId);
@@ -1025,6 +1138,16 @@ const stallGuard = createStallGuard({
 
 normalizeModelBaseUrls();
 const runtimeModel = runtimeModelForEnvironment(tenantPackage.model);
+/*
+ * A custom provider's endpoint reaches the built-in Bots' SDK the way any named endpoint does:
+ * through OPENAI_BASE_URL, which is the variable that SDK reads. Selecting the provider by name
+ * is the deployment's statement about where its model lives, so the row's endpoint (already
+ * honouring the provider's own endpoint variable) is written there for the SDK and for the
+ * smaller model callers that read the environment directly.
+ */
+if (runtimeModel.customProvider) {
+  process.env.OPENAI_BASE_URL = runtimeModel.customProvider.baseUrl;
+}
 
 const intentRouter = createIntentRouter({
   complete: createModelCompleter({
@@ -1034,6 +1157,7 @@ const intentRouter = createIntentRouter({
         encryptionKey: config.keyEncryptionKey,
         reader: credentialStore,
         provider: runtimeModel.provider,
+        keyVariable: runtimeModel.customProvider?.keyVariable,
         keyId: tenantPackage.model.credentialSecretRef,
         environment: process.env,
       }),
@@ -1053,6 +1177,7 @@ const chooseSkills = createModelCompleter({
       encryptionKey: config.keyEncryptionKey,
       reader: credentialStore,
       provider: runtimeModel.provider,
+      keyVariable: runtimeModel.customProvider?.keyVariable,
       keyId: tenantPackage.model.credentialSecretRef,
       environment: process.env,
     }),
@@ -1066,6 +1191,7 @@ const resolveRuntimeModelApiKey = () =>
     encryptionKey: config.keyEncryptionKey,
     reader: credentialStore,
     provider: runtimeModel.provider,
+    keyVariable: runtimeModel.customProvider?.keyVariable,
     keyId: tenantPackage.model.credentialSecretRef,
     environment: process.env,
   });

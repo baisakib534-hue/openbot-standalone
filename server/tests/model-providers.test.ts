@@ -11,6 +11,7 @@ import {
   anthropicMessagesUrl,
   createModelCompleter,
 } from "../src/routing/model";
+import type { ProviderSpec } from "../../shared/model-providers";
 import { validateTenantPackage } from "../src/tenant-package";
 
 const encryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -480,6 +481,149 @@ async function bounded<T>(promise: Promise<T>, boundary: string): Promise<T> {
     clearTimeout(timer);
   }
 }
+
+describe("custom providers for the built-in Bots", () => {
+  const nineRouter: ProviderSpec = {
+    id: "9router" as ProviderSpec["id"],
+    label: "9router",
+    keyVariable: "NINEROUTER_API_KEY",
+    baseUrlVariable: "PROVIDER_9ROUTER_BASE_URL",
+    defaultModel: "auto:default",
+    baseUrl: "https://ninerouter-vzw3.onrender.com/v1",
+    api: "chat",
+  };
+  const lookup =
+    (specs: Record<string, ProviderSpec>) =>
+    (provider: string | undefined): ProviderSpec | undefined =>
+      provider ? specs[provider] : undefined;
+
+  test("BOT_PROVIDER naming a custom provider selects its endpoint and default model", () => {
+    expect(
+      runtimeModelForEnvironment(
+        packageModel,
+        { BOT_PROVIDER: " 9Router " },
+        lookup({ "9router": nineRouter }),
+      ),
+    ).toEqual({
+      provider: "openai",
+      defaultModel: "auto:default",
+      customProvider: {
+        id: "9router",
+        baseUrl: "https://ninerouter-vzw3.onrender.com/v1",
+        keyVariable: "NINEROUTER_API_KEY",
+      },
+    });
+  });
+
+  test("BOT_MODEL wins over the custom provider's default, and its endpoint variable wins over its row", () => {
+    expect(
+      runtimeModelForEnvironment(
+        packageModel,
+        {
+          BOT_PROVIDER: "9router",
+          BOT_MODEL: " combo:top ",
+          PROVIDER_9ROUTER_BASE_URL: " https://router.internal/v1 ",
+        },
+        lookup({ "9router": nineRouter }),
+      ).customProvider,
+    ).toEqual({
+      id: "9router",
+      baseUrl: "https://router.internal/v1",
+      keyVariable: "NINEROUTER_API_KEY",
+    });
+    expect(
+      runtimeModelForEnvironment(
+        packageModel,
+        { BOT_PROVIDER: "9router", BOT_MODEL: " combo:top " },
+        lookup({ "9router": nineRouter }),
+      ).defaultModel,
+    ).toBe("combo:top");
+  });
+
+  test("a registered provider with no endpoint of its own is not a custom selection", () => {
+    const google: ProviderSpec = {
+      id: "google" as ProviderSpec["id"],
+      label: "Google",
+      keyVariable: "GOOGLE_API_KEY",
+      baseUrlVariable: "GOOGLE_GENERATIVE_AI_BASE_URL",
+      defaultModel: "gemini-2.5-flash",
+    };
+    expect(
+      runtimeModelForEnvironment(
+        packageModel,
+        { BOT_PROVIDER: "google" },
+        lookup({ google }),
+      ),
+    ).toEqual(packageModel);
+  });
+
+  test("a custom provider's key comes from its own variable, never the stored package credential", async () => {
+    let storedRead = false;
+    const resolved = await resolveModelApiKey({
+      encryptionKey,
+      provider: "openai",
+      keyId: "primary-model",
+      keyVariable: "NINEROUTER_API_KEY",
+      reader: {
+        readModelSecret: async () => {
+          storedRead = true;
+          return {
+            encryptedValue: await encryptSecret(encryptionKey, "stored-key"),
+          };
+        },
+      },
+      environment: { NINEROUTER_API_KEY: " router-key " },
+    });
+    expect(resolved).toBe("router-key");
+    expect(storedRead).toBe(false);
+    expect(
+      await resolveModelApiKey({
+        encryptionKey,
+        provider: "openai",
+        keyId: "primary-model",
+        keyVariable: "NINEROUTER_API_KEY",
+        reader: {
+          readModelSecret: async () => {
+            storedRead = true;
+            return null;
+          },
+        },
+        environment: {},
+      }),
+    ).toBeNull();
+  });
+
+  test("the router completer calls the custom provider's own chat completions URL", async () => {
+    const seen: { url?: string; authorization?: string | null } = {};
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      seen.url = String(input);
+      seen.authorization = new Headers(init?.headers).get("authorization");
+      return Response.json({ choices: [{ message: { content: "ok" } }] });
+    }) as typeof fetch;
+    try {
+      const complete = createModelCompleter({
+        model: {
+          provider: "openai",
+          defaultModel: "auto:default",
+          customProvider: {
+            id: "9router",
+            baseUrl: "https://ninerouter-vzw3.onrender.com/v1",
+            keyVariable: "NINEROUTER_API_KEY",
+          },
+        },
+        resolveApiKey: async () => "router-key",
+      });
+      expect(await complete("Choose.")).toBe("ok");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(seen.url).toBe(
+      "https://ninerouter-vzw3.onrender.com/v1/chat/completions",
+    );
+    expect(seen.authorization).toBe("Bearer router-key");
+  });
+});
 
 test("cancelling an Anthropic selector closes its in-flight HTTP request", async () => {
   const entered = Promise.withResolvers<void>();

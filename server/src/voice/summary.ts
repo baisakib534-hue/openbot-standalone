@@ -2,7 +2,11 @@ import type { VoiceTranscriptEntry } from "../../../shared/voice-session";
 import { PlanModel } from "../agents/plan-model";
 import type { TitlerOptions } from "../channels/titler";
 import type { RuntimeModel } from "../copilot";
-import { anthropicMessagesUrl, chatCompletionsUrl } from "../routing/model";
+import {
+  anthropicMessagesUrl,
+  chatCompletionsUrl,
+  chatCompletionsUrlFromBase,
+} from "../routing/model";
 
 export type VoiceSummarizer = (
   transcript: readonly VoiceTranscriptEntry[],
@@ -73,7 +77,9 @@ export function createVoiceSummarizer(
     const response = await (options.fetchImpl ?? fetch)(
       anthropic
         ? anthropicMessagesUrl(environment)
-        : chatCompletionsUrl(environment),
+        : options.model.customProvider
+          ? chatCompletionsUrlFromBase(options.model.customProvider.baseUrl)
+          : chatCompletionsUrl(environment),
       {
         method: "POST",
         headers: {

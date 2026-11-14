@@ -21,7 +21,9 @@ export function createModelCompleter(deps: {
     const response = await fetch(
       anthropic
         ? anthropicMessagesUrl(process.env)
-        : chatCompletionsUrl(process.env),
+        : deps.model.customProvider
+          ? chatCompletionsUrlFromBase(deps.model.customProvider.baseUrl)
+          : chatCompletionsUrl(process.env),
       {
         method: "POST",
         headers: {
@@ -97,7 +99,14 @@ export function createModelCompleter(deps: {
 export function chatCompletionsUrl(
   environment: Record<string, string | undefined>,
 ): string {
-  const base = (environment.OPENAI_BASE_URL?.trim() || "https://api.openai.com")
+  return chatCompletionsUrlFromBase(
+    environment.OPENAI_BASE_URL?.trim() || "https://api.openai.com",
+  );
+}
+
+/** The same version rule, for a base URL a custom provider's row names directly. */
+export function chatCompletionsUrlFromBase(baseUrl: string): string {
+  const base = baseUrl
     // A trailing slash is the difference between `/v1` and `/v1/`, and no more than that.
     .replace(/\/+$/, "");
   return /\/v\d+$/.test(base)

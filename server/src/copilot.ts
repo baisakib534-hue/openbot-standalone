@@ -13,6 +13,10 @@ import { defer, finalize, from, fromEvent, switchMap, takeUntil } from "rxjs";
 import { z } from "zod";
 import { PROVENANCE_GUIDANCE } from "../../shared/bot-prompt";
 import {
+  type ProviderSpec,
+  providerSpec,
+} from "../../shared/model-providers";
+import {
   type ActorAgentResolver,
   CoworkerUnavailableError,
 } from "./agents/agent-resolver";
@@ -192,6 +196,20 @@ export type RuntimeModel = {
   provider: "openai" | "anthropic";
   defaultModel: string;
   plan?: PlanModelConfig;
+  /**
+   * A custom provider (see `shared/model-providers.ts`'s overlay) this deployment selected.
+   *
+   * Present only when `BOT_PROVIDER` named one. The SDK-facing `provider` stays "openai" —
+   * a custom provider is an OpenAI-compatible chat endpoint, and "openai" is the name the
+   * built-in Bots' SDK speaks — while this carries what is actually custom about it: the id
+   * the deployment chose, the endpoint itself, and the variable its key arrives in. Key
+   * resolution and the router's completer read it; nothing else needs to know.
+   */
+  customProvider?: {
+    id: string;
+    baseUrl: string;
+    keyVariable: string;
+  };
 };
 
 /** Optional desktop environment values may be present but blank; SDKs treat them as URLs. */
@@ -215,9 +233,40 @@ export function normalizeModelBaseUrls(
 export function runtimeModelForEnvironment(
   packageModel: RuntimeModel,
   environment: Record<string, string | undefined> = process.env,
+  /**
+   * The provider registry lookup, injectable because the registry reads its overlay once at
+   * module load: a test that wants a custom provider says so here rather than arranging the
+   * process environment before import.
+   */
+  lookupProvider: (provider: string | undefined) => ProviderSpec | undefined = providerSpec,
 ): RuntimeModel {
   const selectedModel = environment.BOT_MODEL?.trim();
   const selectedProvider = environment.BOT_PROVIDER?.trim().toLowerCase();
+  /*
+   * A custom provider named in BOT_PROVIDER: an OpenAI-compatible endpoint the deployment
+   * registered as data. It wins over the tenant package the way a built-in choice does — the
+   * environment is how a deployment overrides what the repository decided — and BOT_MODEL
+   * always applies to it, because an endpoint names its own catalogue (the same reason a
+   * model named beside OPENAI_BASE_URL applies today).
+   */
+  if (selectedProvider) {
+    const custom = lookupProvider(selectedProvider);
+    if (custom?.baseUrl) {
+      return {
+        provider: "openai",
+        plan: planModelForEnvironment(environment),
+        defaultModel: selectedModel || custom.defaultModel,
+        customProvider: {
+          id: custom.id,
+          // The row's own endpoint variable outranks the row, as everywhere in this registry:
+          // it is how a deployment moves one named provider without rewriting its overlay.
+          baseUrl:
+            environment[custom.baseUrlVariable]?.trim() || custom.baseUrl,
+          keyVariable: custom.keyVariable,
+        },
+      };
+    }
+  }
   // The desktop writes an empty provider when switching back to OpenAI. An absent
   // choice leaves the tenant package authoritative.
   const provider =
@@ -392,7 +441,7 @@ export function builtInAgentConfiguration(
       // biome-ignore lint/correctness/useYield: this agent must fail when iteration starts.
       factory: async function* () {
         throw new Error(
-          `Model credential is not configured for ${agent.name}. Add the package credential or set ${model.provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"}.`,
+          `Model credential is not configured for ${agent.name}. Add the package credential or set ${model.customProvider?.keyVariable ?? (model.provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY")}.`,
         );
       },
     };

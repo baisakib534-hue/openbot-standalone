@@ -1,3 +1,4 @@
+import * as builtinPlatform from "./builtin-platform";
 import * as builtinRoutines from "./builtin-routines";
 import * as composio from "./composio";
 import * as driveRest from "./google-drive-rest";
@@ -119,6 +120,7 @@ export type TransportKind =
   | "mcp"
   | "google-drive-rest"
   | "builtin-routines"
+  | "builtin-platform"
   | "composio";
 
 /**
@@ -144,6 +146,7 @@ const TRANSPORTS: Record<TransportKind, VendorTransport> = {
   mcp,
   "google-drive-rest": driveRest,
   "builtin-routines": builtinRoutines,
+  "builtin-platform": builtinPlatform,
   composio,
 };
 

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import {
   MODEL_PROVIDERS,
   PROVIDER_IDS,
@@ -6,9 +7,11 @@ import {
   baseUrlVariableFor,
   botSettings,
   configuredModel,
+  customProviderFromRow,
   defaultModelFor,
   keyIsRequired,
   keyVariableFor,
+  parseCustomProvidersOverlay,
   providerSpec,
   requiresResponsesApi,
 } from "./model-providers";
@@ -317,6 +320,138 @@ describe("what a Bot runs from the spec file", () => {
     expect(Object.keys(MODEL_PROVIDERS).sort()).toEqual(
       [...PROVIDER_IDS].sort(),
     );
+  });
+});
+
+/**
+ * Custom providers: the overlay a deployment writes instead of editing this repository.
+ *
+ * The example row is the one FEATURES.md walks through — a named OpenAI-compatible router —
+ * because that is the shape the feature exists for: two routers side by side, each picked by
+ * name, neither reached by restating OPENAI_BASE_URL.
+ */
+describe("custom providers from the overlay", () => {
+  const example = JSON.stringify({
+    providers: {
+      "9router": {
+        label: "9router",
+        base_url: "https://ninerouter-vzw3.onrender.com/v1",
+        key_variable: "NINEROUTER_API_KEY",
+        default_model: "auto:default",
+      },
+    },
+    bots: { "agent-langgraph": { provider: "9router", model: "auto:default" } },
+  });
+
+  test("a valid overlay row becomes a provider spec naming its endpoint", () => {
+    const overlay = parseCustomProvidersOverlay(example, "test-overlay");
+    expect(overlay.providers).toHaveLength(1);
+    const spec = overlay.providers[0];
+    expect(spec?.id).toBe("9router");
+    expect(spec?.label).toBe("9router");
+    expect(spec?.baseUrl).toBe("https://ninerouter-vzw3.onrender.com/v1");
+    expect(spec?.keyVariable).toBe("NINEROUTER_API_KEY");
+    // Derived from the id, so the endpoint can still be overridden by variable. The id leads
+    // with a digit, so the derived name is prefixed into one a shell accepts.
+    expect(spec?.baseUrlVariable).toBe("PROVIDER_9ROUTER_BASE_URL");
+    expect(spec?.defaultModel).toBe("auto:default");
+    expect(spec?.api).toBe("chat");
+    expect(overlay.bots["agent-langgraph"]).toEqual({
+      provider: "9router",
+      model: "auto:default",
+    });
+  });
+
+  test("a bad overlay row fails clearly, naming the field", () => {
+    const row = {
+      label: "Broken",
+      base_url: "https://router.example/v1",
+      key_variable: "BROKEN_API_KEY",
+    };
+    expect(() =>
+      customProviderFromRow("test-overlay", "broken", row),
+    ).toThrow(/providers\.broken\.default_model must be a non-empty string/);
+    expect(() =>
+      customProviderFromRow("test-overlay", "broken", {
+        ...row,
+        default_model: "m",
+        base_url: "not a url",
+      }),
+    ).toThrow(/providers\.broken\.base_url is not a URL/);
+    expect(() =>
+      customProviderFromRow("test-overlay", "broken", {
+        ...row,
+        default_model: "m",
+        api: "responses",
+      }),
+    ).toThrow(/providers\.broken\.api must be "chat"/);
+    expect(() =>
+      customProviderFromRow("test-overlay", "Bad Id", {
+        ...row,
+        default_model: "m",
+      }),
+    ).toThrow(/not a usable provider id/);
+  });
+
+  test("an overlay may not redefine a built-in provider", () => {
+    expect(() =>
+      parseCustomProvidersOverlay(
+        JSON.stringify({
+          providers: {
+            openai: {
+              label: "Fake",
+              base_url: "https://router.example/v1",
+              key_variable: "FAKE_API_KEY",
+              default_model: "m",
+            },
+          },
+        }),
+        "test-overlay",
+      ),
+    ).toThrow(/providers\.openai redefines a built-in provider/);
+  });
+
+  test("an overlay that is not JSON fails naming its source", () => {
+    expect(() => parseCustomProvidersOverlay("{nope", "CUSTOM_PROVIDERS_JSON")).toThrow(
+      /CUSTOM_PROVIDERS_JSON: is not valid JSON/,
+    );
+  });
+
+  /**
+   * The end-to-end claim: with only the environment set, a fresh process's registry lists the
+   * custom provider and a Bot resolves onto it — no code change anywhere. Module load reads the
+   * environment once, so this runs in a child process rather than in this test's own imports.
+   */
+  test("a fresh process lists the overlay provider with no code change", () => {
+    const script = `
+      const m = await import(${JSON.stringify(`${import.meta.dir}/model-providers.ts`)});
+      const spec = m.providerSpec("9router");
+      const settings = m.botSettings("agent-langgraph", {});
+      console.log(JSON.stringify({
+        listed: m.CUSTOM_PROVIDER_IDS,
+        baseUrl: spec?.baseUrl,
+        keyVariable: m.keyVariableFor("9router"),
+        defaultModel: m.defaultModelFor("9router"),
+        settings,
+      }));
+    `;
+    const run = spawnSync(process.execPath, ["-e", script], {
+      env: { ...process.env, CUSTOM_PROVIDERS_JSON: example },
+      encoding: "utf-8",
+    });
+    expect(run.status).toBe(0);
+    const out = JSON.parse(run.stdout.trim().split("\n").at(-1) ?? "{}") as {
+      listed?: string[];
+      baseUrl?: string;
+      keyVariable?: string;
+      defaultModel?: string;
+      settings?: { provider: string; model: string };
+    };
+    expect(out.listed).toEqual(["9router"]);
+    expect(out.baseUrl).toBe("https://ninerouter-vzw3.onrender.com/v1");
+    expect(out.keyVariable).toBe("NINEROUTER_API_KEY");
+    expect(out.defaultModel).toBe("auto:default");
+    expect(out.settings).toEqual({ provider: "9router", model: "auto:default" });
   });
 });
 
