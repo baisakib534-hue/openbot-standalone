@@ -633,6 +633,22 @@ describe("custom providers for the built-in Bots", () => {
     expect(asked).toEqual([{ provider: "custom-provider", keyId: "9router" }]);
   });
 
+  test("the production shape: package credential absent, env key variable set — the deployment key resolves", async () => {
+    // The Render failure's exact coordinates at this layer: credentialSecretRef resolves to
+    // nothing (the reader answers null for the package), and the ONLY key anywhere is the
+    // custom provider's own variable. This must be that key — never null.
+    const resolved = await resolveModelApiKey({
+      encryptionKey,
+      provider: "openai",
+      keyId: "primary-model",
+      keyVariable: "NINEROUTER_API_KEY",
+      customProviderId: "9router",
+      reader: { readModelSecret: async () => null },
+      environment: { NINEROUTER_API_KEY: " router-key " },
+    });
+    expect(resolved).toBe("router-key");
+  });
+
   test("the router completer calls the custom provider's own chat completions URL", async () => {
     const seen: { url?: string; authorization?: string | null } = {};
     const originalFetch = globalThis.fetch;

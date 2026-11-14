@@ -82,6 +82,20 @@ class OverlayLoading(unittest.TestCase):
         self.assertEqual(out["bot"], {"provider": "9router", "model": "auto:default"})
         self.assertEqual(out["default"], "auto:default")
 
+    def test_flat_env_overlay_registers_the_provider(self) -> None:
+        # No "providers" wrapper: rows at the top level, the shape a hosting dashboard's
+        # env var naturally holds. Mirrors parseCustomProvidersOverlay in the TS loader.
+        flat = {
+            "9router": EXAMPLE_OVERLAY["providers"]["9router"],
+            "bots": EXAMPLE_OVERLAY["bots"],
+        }
+        run = run_probe({"CUSTOM_PROVIDERS_JSON": json.dumps(flat)})
+        self.assertEqual(run.returncode, 0, run.stderr)
+        out = json.loads(run.stdout)
+        self.assertEqual(out["custom"], ["9router"])
+        self.assertEqual(out["row"]["base_url"], "https://ninerouter-vzw3.onrender.com/v1")
+        self.assertEqual(out["bot"], {"provider": "9router", "model": "auto:default"})
+
     def test_file_overlay_registers_the_provider(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

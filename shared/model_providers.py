@@ -151,9 +151,19 @@ def _parse_overlay(source: str, parsed: Any) -> tuple[dict[str, dict[str, str]],
     if not isinstance(parsed, dict):
         raise _overlay_fail(source, "must hold a JSON object.")
     providers: dict[str, dict[str, str]] = {}
-    raw_providers = parsed.get("providers") or {}
-    if not isinstance(raw_providers, dict):
-        raise _overlay_fail(source, "providers must be an object.")
+    if "providers" in parsed:
+        raw_providers = parsed.get("providers") or {}
+        if not isinstance(raw_providers, dict):
+            raise _overlay_fail(source, "providers must be an object.")
+    else:
+        # Flat shape — {"<provider id>": {row}} with no "providers" wrapper; mirrors
+        # parseCustomProvidersOverlay in shared/model-providers.ts. Every top-level key but
+        # "bots" and "_readme" is a provider id, validated row by row like a wrapped row.
+        raw_providers = {
+            key: value
+            for key, value in parsed.items()
+            if key not in ("bots", "_readme")
+        }
     for provider_id, row in raw_providers.items():
         providers[provider_id] = _custom_provider_from_row(source, provider_id, row)
     bots: dict[str, Any] = {}

@@ -445,7 +445,7 @@ export function builtInAgentConfiguration(
       // biome-ignore lint/correctness/useYield: this agent must fail when iteration starts.
       factory: async function* () {
         throw new Error(
-          `Model credential is not configured for ${agent.name}. Add the package credential or set ${model.customProvider?.keyVariable ?? (model.provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY")}.`,
+          `Model credential is not configured for ${agent.name}. Add the package credential or set ${model.customProvider?.keyVariable ?? (model.provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY")}. Or set BOT_PROVIDER to a configured provider with its key, or set the default on the Providers page.`,
         );
       },
     };

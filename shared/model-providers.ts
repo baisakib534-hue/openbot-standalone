@@ -251,10 +251,30 @@ export function parseCustomProvidersOverlay(
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     failOverlay(source, "must hold a JSON object.");
   }
-  const overlay = parsed as OverlayFile;
+  const overlay = parsed as OverlayFile & Record<string, unknown>;
+  /*
+   * Two shapes are accepted. The wrapped one — {"providers": {…}, "bots": {…}} — is what the
+   * overlay file and the examples use. The flat one — {"<provider id>": {…row…}} — is what a
+   * hosting dashboard's environment variable naturally holds when a deployment registers a
+   * single provider inline, and it is the shape the deploy instructions once handed out. A
+   * flat overlay is recognised by the ABSENCE of the "providers" key; every other top-level
+   * key but "bots" and "_readme" is then a provider id, and each row goes through the same
+   * validation as a wrapped row, so a malformed flat overlay fails loudly at startup. It once
+   * did not: a flat CUSTOM_PROVIDERS_JSON parsed to zero providers in silence, the registry
+   * never learned the provider existed, BOT_PROVIDER named nothing, and the built-in Bots
+   * failed at run time with a credential error naming a variable nobody had been told to set.
+   */
+  const providerRows: Record<string, unknown> =
+    overlay.providers !== undefined
+      ? (overlay.providers as Record<string, unknown>)
+      : Object.fromEntries(
+          Object.entries(overlay).filter(
+            ([key]) => key !== "bots" && key !== "_readme",
+          ),
+        );
   const providers: ProviderSpec[] = [];
-  for (const [id, row] of Object.entries(overlay.providers ?? {})) {
-    providers.push(customProviderFromRow(source, id, row));
+  for (const [id, row] of Object.entries(providerRows)) {
+    providers.push(customProviderFromRow(source, id, row as CustomProviderRow));
   }
   const bots: Record<string, { provider: string; model: string }> = {};
   for (const [botId, entry] of Object.entries(overlay.bots ?? {})) {

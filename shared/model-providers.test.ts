@@ -417,6 +417,46 @@ describe("custom providers from the overlay", () => {
     );
   });
 
+  test("a flat overlay — rows at the top level, no providers wrapper — registers its providers", () => {
+    // The shape a hosting dashboard's env var naturally holds, and the exact shape the
+    // production Render deploy was handed. It once parsed to zero providers in silence:
+    // the registry never learned 9router existed, BOT_PROVIDER named nothing, and the
+    // built-in Bots failed at run time with a credential error naming OPENAI_API_KEY.
+    const overlay = parseCustomProvidersOverlay(
+      JSON.stringify({
+        "9router": {
+          label: "9Router",
+          base_url: "https://ninerouter-vzw3.onrender.com/v1",
+          key_variable: "NINEROUTER_API_KEY",
+          default_model: "auto",
+          api: "chat",
+        },
+        bots: { "agent-langgraph": { provider: "9router", model: "hermes" } },
+      }),
+      "CUSTOM_PROVIDERS_JSON",
+    );
+    expect(overlay.providers).toHaveLength(1);
+    expect(overlay.providers[0]?.id).toBe("9router");
+    expect(overlay.providers[0]?.baseUrl).toBe(
+      "https://ninerouter-vzw3.onrender.com/v1",
+    );
+    expect(overlay.providers[0]?.keyVariable).toBe("NINEROUTER_API_KEY");
+    expect(overlay.providers[0]?.defaultModel).toBe("auto");
+    expect(overlay.bots["agent-langgraph"]).toEqual({
+      provider: "9router",
+      model: "hermes",
+    });
+  });
+
+  test("a malformed flat overlay row fails loudly instead of parsing to zero providers", () => {
+    expect(() =>
+      parseCustomProvidersOverlay(
+        JSON.stringify({ "9router": { label: "9Router" } }),
+        "CUSTOM_PROVIDERS_JSON",
+      ),
+    ).toThrow(/providers\.9router\./);
+  });
+
   /**
    * The end-to-end claim: with only the environment set, a fresh process's registry lists the
    * custom provider and a Bot resolves onto it — no code change anywhere. Module load reads the

@@ -8,6 +8,7 @@ import { BuiltInAgent } from "@copilotkit/runtime/v2";
 import { EMPTY, lastValueFrom } from "rxjs";
 import { z } from "zod";
 import { PROVENANCE_GUIDANCE } from "../../shared/bot-prompt";
+import { readCustomProvidersEnvOverlay } from "../../shared/model-providers";
 import { createActorAgentResolver } from "../src/agents/agent-resolver";
 import { MAX_INLINED_BYTES_PER_RUN } from "../src/channels/attachment-parts";
 import { loadConfig } from "../src/config";
@@ -22,7 +23,13 @@ import {
   runtimeModelForEnvironment,
   standingRoleMessage,
 } from "../src/copilot";
+import { resolveModelApiKey } from "../src/credentials";
 import { grantedToolGuidance } from "../src/plugins/tools";
+import { CustomProviderRegistry } from "../src/providers/custom-providers";
+import {
+  environmentWithDeploymentDefault,
+  InMemoryDeploymentDefaultStore,
+} from "../src/providers/deployment-default";
 import { loadTenantPackage } from "../src/tenant-package";
 import { UNTRUSTED_GUIDANCE } from "../src/untrusted-content";
 import { testEnvironment } from "./support/environment";
@@ -217,6 +224,143 @@ describe("deployment model selection", () => {
       expect(request.model).toBe("gpt-5.6-terra");
     },
   );
+
+  test("production scenario: a flat CUSTOM_PROVIDERS_JSON drives a built-in Bot end to end", async () => {
+    /*
+     * The exact Render deployment that failed live: BOT_PROVIDER names a custom provider
+     * registered through a FLAT overlay (no "providers" wrapper), BOT_MODEL names its model,
+     * the key sits in the provider's own variable, the tenant package's credentialSecretRef
+     * resolves to nothing (the reader below finds no stored secret), and OPENAI_API_KEY is
+     * unset. Before the fix the flat overlay parsed to zero providers in silence, the
+     * resolver never learned 9router existed, and the Bot's factory threw "Model credential
+     * is not configured … set OPENAI_API_KEY".
+     */
+    const environment: Record<string, string | undefined> = {
+      BOT_PROVIDER: "9router",
+      BOT_MODEL: "hermes",
+      CUSTOM_PROVIDERS_JSON: JSON.stringify({
+        "9router": {
+          label: "9Router",
+          base_url: "https://ninerouter-vzw3.onrender.com/v1",
+          key_variable: "NINEROUTER_API_KEY",
+          default_model: "auto",
+          api: "chat",
+        },
+      }),
+      NINEROUTER_API_KEY: "router-secret",
+    };
+    const tenantPackage = await loadTenantPackage(packagePath);
+    const registry = new CustomProviderRegistry(
+      readCustomProvidersEnvOverlay(environment),
+    );
+    const model = runtimeModelForEnvironment(tenantPackage.model, environment, (provider) =>
+      registry.lookup(provider),
+    );
+    // The endpoint comes from the provider row, not from OPENAI_BASE_URL (unset here), and
+    // BOT_MODEL names the model on that provider.
+    expect(model.customProvider).toEqual({
+      id: "9router",
+      baseUrl: "https://ninerouter-vzw3.onrender.com/v1",
+      keyVariable: "NINEROUTER_API_KEY",
+    });
+    expect(model.defaultModel).toBe("hermes");
+
+    const recorder = new LLMock();
+    const originalBase = process.env.OPENAI_BASE_URL;
+    try {
+      // index.ts writes the selected provider's endpoint into OPENAI_BASE_URL for the SDK;
+      // the recorder stands in for that endpoint so the request can be inspected.
+      process.env.OPENAI_BASE_URL = await recorder.start();
+      recorder.onMessage(/.*/, {
+        type: "text",
+        content: "ROUTED001 fixture completed.",
+      });
+      const agents = await resolveRuntimeAgents(
+        () => [
+          {
+            id: "general-assistant",
+            name: "General Assistant",
+            type: "built_in" as const,
+            systemPrompt: "Be helpful.",
+          },
+        ],
+        model,
+        // Wired exactly as index.ts wires resolveRuntimeModelApiKey.
+        () =>
+          resolveModelApiKey({
+            encryptionKey: "unused-no-stored-secrets",
+            reader: { readModelSecret: async () => null },
+            provider: model.provider,
+            keyVariable: model.customProvider?.keyVariable,
+            customProviderId: model.customProvider?.id,
+            keyId: tenantPackage.model.credentialSecretRef,
+            environment,
+          }),
+      );
+      const agent = built(agents, "general-assistant").clone();
+      agent.addMessage({
+        id: "routed001-request",
+        role: "user",
+        content: "Complete the fixture request.",
+      });
+      await agent.runAgent();
+      expect(agent.messages.at(-1)).toMatchObject({
+        role: "assistant",
+        content: "ROUTED001 fixture completed.",
+      });
+      expect(recorder.getRequests()).toHaveLength(1);
+      expect(
+        (recorder.getRequests()[0]?.body as { model?: unknown }).model,
+      ).toBe("hermes");
+    } finally {
+      if (originalBase === undefined) delete process.env.OPENAI_BASE_URL;
+      else process.env.OPENAI_BASE_URL = originalBase;
+      await recorder.stop();
+    }
+  });
+
+  test("an in-app deployment default outranks BOT_PROVIDER/BOT_MODEL in the environment", async () => {
+    const environment: Record<string, string | undefined> = {
+      BOT_PROVIDER: "9router",
+      BOT_MODEL: "hermes",
+      CUSTOM_PROVIDERS_JSON: JSON.stringify({
+        providers: {
+          "9router": {
+            label: "9Router",
+            base_url: "https://ninerouter-vzw3.onrender.com/v1",
+            key_variable: "NINEROUTER_API_KEY",
+            default_model: "auto",
+            api: "chat",
+          },
+          freellmapi: {
+            label: "FreeLLMAPI",
+            base_url: "https://freellmapi-hk0l.onrender.com/v1",
+            key_variable: "FREELLMAPI_API_KEY",
+            default_model: "auto:default",
+            api: "chat",
+          },
+        },
+      }),
+    };
+    const tenantPackage = await loadTenantPackage(packagePath);
+    const registry = new CustomProviderRegistry(
+      readCustomProvidersEnvOverlay(environment),
+    );
+    const defaults = new InMemoryDeploymentDefaultStore();
+    await defaults.set({ provider: "freellmapi", model: "auto:deepseek" }, "admin");
+
+    const model = runtimeModelForEnvironment(
+      tenantPackage.model,
+      environmentWithDeploymentDefault(environment, await defaults.get()),
+      (provider) => registry.lookup(provider),
+    );
+
+    expect(model.customProvider?.id).toBe("freellmapi");
+    expect(model.customProvider?.baseUrl).toBe(
+      "https://freellmapi-hk0l.onrender.com/v1",
+    );
+    expect(model.defaultModel).toBe("auto:deepseek");
+  });
 });
 
 describe("registered Copilot agents", () => {

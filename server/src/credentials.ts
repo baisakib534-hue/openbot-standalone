@@ -279,10 +279,9 @@ export async function resolveModelApiKey(input: {
   keyId: string;
   environment: Record<string, string | undefined>;
   /**
-   * The variable a custom provider's key arrives in. The environment still wins when it holds a
-   * value; what changed is the fallback. Without a `customProviderId` there is none — the stored
-   * credential belongs to the tenant package's own provider and key id, and reading it for an
-   * endpoint it was never stored for would spend the wrong key at the wrong host.
+   * The variable the selected provider's key arrives in, when the deployment selected one by
+   * name (a custom provider's row names it). See the precedence in the body: on the
+   * deployment path this variable is the first source consulted.
    */
   keyVariable?: string;
   /**
@@ -292,6 +291,28 @@ export async function resolveModelApiKey(input: {
    */
   customProviderId?: string;
 }) {
+  /*
+   * Precedence — two chains, and which one runs is decided by whether the deployment
+   * selected a provider by name:
+   *
+   * PACKAGE PATH (no custom provider selected): the tenant package's stored credential,
+   * when one actually exists, wins over the environment; then the provider's environment
+   * key (OPENAI_API_KEY / ANTHROPIC_API_KEY). This is the upstream order, unchanged.
+   *
+   * DEPLOYMENT PATH (a custom provider selected via BOT_PROVIDER or the in-app default):
+   * the environment value under the provider's own key variable, then the vault credential
+   * stored for THAT provider at registration. The package credential is deliberately never
+   * read on this path: it belongs to the package's own provider and key id, and spending it
+   * at a third-party endpoint it was never stored for would spend the wrong key at the
+   * wrong host. The model-providers tests pin this ("never the stored package credential").
+   *
+   * The production failure this ordering must never recreate: package credential absent +
+   * deployment provider selected + its key variable set MUST resolve to that key. It once
+   * resolved to null — not here, but upstream of here: the registry never learned the
+   * provider existed (a flat CUSTOM_PROVIDERS_JSON parsed to zero providers), so this
+   * function was called with no keyVariable and no customProviderId and only the empty
+   * package read and an unset OPENAI_API_KEY remained.
+   */
   const environmentKey =
     input.environment[
       input.keyVariable ??
