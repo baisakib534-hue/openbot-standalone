@@ -48,6 +48,8 @@ import {
 } from "./channels/attachments";
 import type { ChannelEventHub } from "./channels/events";
 import { createGroupRoutes, type GroupConversations } from "./channels/group";
+import { createSpaceRoutes } from "./spaces/routes";
+import type { SpaceStore } from "./spaces/store";
 import { type ChannelStore, createChannelRoutes } from "./channels/routes";
 import type { ThreadIdentity } from "./channels/thread-identity";
 import { createThreadRoutes } from "./channels/thread-routes";
@@ -391,6 +393,13 @@ export function createApp(
       store: DemonstrationStore;
       recorder: DemonstrationRecorder;
     };
+    /**
+     * Spaces: the document workspaces ported from OpenDots. The store carries spaces, pages,
+     * grants and page-thread bindings; the thread identity mints the page conversations' thread
+     * ids the same way every other thread in the deployment is minted. Absent, no Spaces surface
+     * exists.
+     */
+    spaces?: { store: SpaceStore; threadIdentity: ThreadIdentity };
     approvals?: ApprovalService;
     /**
      * Shared apps: who may use an app's one team account, and the switch that makes an app Shared.
@@ -1530,6 +1539,13 @@ export function createApp(
     );
   if (coworker?.groups)
     app.route("/api/groups", createGroupRoutes(coworker.groups, requireUser));
+  if (coworker?.spaces)
+    app.route(
+      "/api/spaces",
+      createSpaceRoutes(coworker.spaces.store, requireUser, {
+        threadIdentity: coworker.spaces.threadIdentity,
+      }),
+    );
   if (coworker?.teamBots)
     app.route(
       "/api/team-bots",

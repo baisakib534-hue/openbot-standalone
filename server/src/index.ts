@@ -259,6 +259,8 @@ import type { Responsibility } from "./responsibilities/types";
 import { createTurnRunner } from "./routines/run-turn";
 import { createRoutineRunner } from "./routines/runner";
 import { createRoutineStore } from "./routines/store";
+import { createSpaceStore } from "./spaces/store";
+import { pageContextText, spaceTools } from "./spaces/tools";
 import { createIntentRouter } from "./routing/classify";
 import { createModelCompleter } from "./routing/model";
 import { createSelfHostBanner } from "./self-host-banner";
@@ -830,6 +832,9 @@ if (composio) {
 const routineStore = createRoutineStore(database);
 useRoutineTools(routineStore);
 
+/** Spaces and their pages, grants and page-thread bindings (the OpenDots port). */
+const spaceStore = createSpaceStore(database, bootAuditStore);
+
 /*
  * Platform Tools, and the one moment its tools are told what to act on.
  *
@@ -1247,6 +1252,20 @@ const memoryIngestion = createMemoryIngestion({
 const proactiveReadOnlyRefs = createReadOnlyClassifier(pluginStore);
 const loadPersonalMemoryForActor = (ownerUserId: string) => (botId: string) =>
   memoryIngestion.contextFor(ownerUserId, botId);
+/**
+ * The page a run is about, if its thread is a page conversation. Both halves of the grant are
+ * re-checked per run — the space is this person's AND this Bot still holds it — so a revoked
+ * grant takes the page out of the next run's context, not just out of its tool list.
+ */
+const loadPageContextForActor =
+  (ownerUserId: string) =>
+  async (botId: string, threadId: string): Promise<string | null> => {
+    const bound = await spaceStore.pageForThread(threadId);
+    if (!bound) return null;
+    const accessible = await spaceStore.accessibleSpaces(ownerUserId, botId);
+    if (!accessible.some((space) => space.id === bound.space.id)) return null;
+    return pageContextText(bound.page, bound.space);
+  };
 const memorySweep = repeatAfterEach(async () => {
   try {
     await memoryIngestion.syncDue();
@@ -1287,6 +1306,11 @@ const loadToolsForActor =
     ...memoryTools({
       store: personalMemoryStore,
       ingestion: memoryIngestion,
+      ownerUserId: actorId,
+      agentId: botId,
+    }),
+    ...spaceTools({
+      store: spaceStore,
       ownerUserId: actorId,
       agentId: botId,
     }),
@@ -1924,6 +1948,7 @@ const actorAgentResolver = createActorAgentResolver({
     return copilotRuntime.learning?.acquire;
   },
   loadPersonalMemoryForActor,
+  loadPageContextForActor,
 });
 
 const copilotRuntime = mountCopilotRuntime(
@@ -3159,6 +3184,15 @@ const app = createApp(
       const text = await memory.execute(args);
       return { text, isError: text.startsWith(REFUSAL_MARKER) };
     }
+    const space = spaceTools({
+      store: spaceStore,
+      ownerUserId: actorId,
+      agentId: botId,
+    }).find((candidate) => candidate.name === name);
+    if (space) {
+      const text = await space.execute(args);
+      return { text, isError: text.startsWith(REFUSAL_MARKER) };
+    }
     if (!name.startsWith("host_")) return null;
     const tool = hostAccessTools({
       broker: hostAccessBroker,
@@ -3240,6 +3274,7 @@ const app = createApp(
       triggers: responsibilityTriggers,
     },
     groups: groupConversations,
+    spaces: { store: spaceStore, threadIdentity },
     teamBots,
     lifecycle: {
       lifecycle: createBotLifecycleStore(database),

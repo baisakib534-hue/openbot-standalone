@@ -15,6 +15,7 @@ import {
 } from "../copilot";
 import type { AcquireLearnedSkills } from "../learning/runtime";
 import type { LoadPersonalMemory } from "../memory/tools";
+import type { LoadPageContext } from "../spaces/tools";
 import type { AgentActor } from "./profile-types";
 
 export type AgentResolutionContext = {
@@ -69,6 +70,7 @@ export type ActorAgentResolverDependencies = {
   markAttachmentsSentForActor?: (actorId: string) => MarkAttachmentsSent;
   acquireLearnedSkills?: AcquireLearnedSkills;
   loadPersonalMemoryForActor?: (actorId: string) => LoadPersonalMemory;
+  loadPageContextForActor?: (actorId: string) => LoadPageContext;
 };
 
 /**
@@ -112,6 +114,7 @@ export function createActorAgentResolver(
       deps.markAttachmentsSentForActor?.(actor.id),
       deps.acquireLearnedSkills,
       deps.loadPersonalMemoryForActor?.(actor.id),
+      deps.loadPageContextForActor?.(actor.id),
     );
 
   const resolveAgentsForActor = async (actor: AgentActor) =>

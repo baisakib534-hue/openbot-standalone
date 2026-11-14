@@ -62,6 +62,10 @@ import {
   type LoadPersonalMemory,
   PersonalMemoryMiddleware,
 } from "./memory/tools";
+import {
+  type LoadPageContext,
+  PageContextMiddleware,
+} from "./spaces/tools";
 import type { SelectableSkill, Selection } from "./plugins/selection";
 import {
   latestUserText,
@@ -585,6 +589,8 @@ export async function buildAgents(
   markAttachmentsSent?: MarkAttachmentsSent,
   acquireLearnedSkills?: AcquireLearnedSkills,
   loadPersonalMemory?: LoadPersonalMemory,
+  /** The page a run's thread is about, for page conversations. Appended last, as the others are. */
+  loadPageContext?: LoadPageContext,
 ): Promise<Record<string, AbstractAgent>> {
   let vendors: readonly string[] = [];
   try {
@@ -644,6 +650,8 @@ export async function buildAgents(
         );
         if (loadPersonalMemory)
           built.use(new PersonalMemoryMiddleware(agent.id, loadPersonalMemory));
+        if (loadPageContext)
+          built.use(new PageContextMiddleware(agent.id, loadPageContext));
         return [agent.id, built];
       }),
     ),
@@ -1928,6 +1936,7 @@ export async function resolveRuntimeAgents(
   markAttachmentsSent?: MarkAttachmentsSent,
   acquireLearnedSkills?: AcquireLearnedSkills,
   loadPersonalMemory?: LoadPersonalMemory,
+  loadPageContext?: LoadPageContext,
 ): Promise<Record<string, AbstractAgent>> {
   const all = await loadAgents();
   if (all.length === 0) {
@@ -1964,6 +1973,7 @@ export async function resolveRuntimeAgents(
     markAttachmentsSent,
     acquireLearnedSkills,
     loadPersonalMemory,
+    loadPageContext,
   );
 }
 
