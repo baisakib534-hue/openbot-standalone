@@ -1,7 +1,7 @@
 /**
- * What the runtime can do. There is exactly one answer because CopilotKit Intelligence is required
- * for durable threads and memory. Configuration the product cannot function without belongs at the
- * boot boundary.
+ * What the runtime can do. Normally CopilotKit Intelligence is required for durable threads and
+ * memory; `OPENBOT_LOCAL_MODE=true` selects the local, non-durable mode instead (see
+ * LOCAL-MODE.md). Configuration the product cannot function without belongs at the boot boundary.
  */
 import {
   isLearningContainerId,
@@ -18,11 +18,22 @@ import {
 } from "./dictation/config";
 import { type VoiceConfig, voiceConfig } from "./voice/config";
 
-export type RuntimeCapabilities = {
-  mode: "intelligence";
-  durableHistory: true;
-  intelligence: IntelligenceSettings;
-};
+export type RuntimeCapabilities =
+  | {
+      mode: "intelligence";
+      durableHistory: true;
+      intelligence: IntelligenceSettings;
+    }
+  | {
+      /**
+       * Local mode (OPENBOT_LOCAL_MODE=true): no CopilotKit Intelligence at all.
+       * Threads live in the process-wide in-memory runner store, so history does
+       * not survive a restart and replicas do not share it. See LOCAL-MODE.md.
+       */
+      mode: "local";
+      durableHistory: false;
+      intelligence?: undefined;
+    };
 
 /**
  * The Intelligence contract. Three values are required; see runtimeCapabilities.
@@ -915,7 +926,16 @@ function oktaAuth(
  * for a token the platform had stopped handing out. It is still read and still forwarded when a
  * deployment sets one, which is what a self-hosted Intelligence with its own licence needs.
  */
+/** Whether the operator asked for local mode: `OPENBOT_LOCAL_MODE=true` (or `1`). Anything else is off. */
+export function localModeEnabled(environment: Environment): boolean {
+  const raw = optional(environment, "OPENBOT_LOCAL_MODE");
+  return raw === "true" || raw === "1";
+}
+
 function runtimeCapabilities(environment: Environment): RuntimeCapabilities {
+  if (localModeEnabled(environment)) {
+    return { mode: "local", durableHistory: false };
+  }
   const settings = {
     apiUrl: url(environment, "INTELLIGENCE_API_URL"),
     gatewayWsUrl: url(environment, "INTELLIGENCE_GATEWAY_WS_URL"),

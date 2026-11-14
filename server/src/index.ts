@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { AbstractAgent } from "@ag-ui/client";
 import {
   CopilotKitIntelligence,
+  InMemoryAgentRunner,
   IntelligenceAgentRunner,
 } from "@copilotkit/runtime/v2";
 import { serve } from "bun";
@@ -185,6 +186,7 @@ import {
   createIntelligenceClient,
   observeIntelligenceAuthentication,
 } from "./intelligence-client";
+import { createLocalIntelligence } from "./local-intelligence";
 import { clearLearningRevisionFallback } from "./learning/runtime";
 import { createLearningSettingsStore } from "./learning/settings";
 import { createMemoryIngestion } from "./memory/ingestion";
@@ -1681,18 +1683,34 @@ const buildAgentFor = async ({
  * One runner for the process, reused across firings: it opens a socket per run and holds no idle
  * connection, but its `threads` map is per instance, and a runner per turn would fragment the
  * already-running check that keeps two turns off one thread. See `routines/run-turn.ts`.
+ *
+ * LOCAL MODE (OPENBOT_LOCAL_MODE=true): the guard the comment above anticipated. There is no
+ * Intelligence client and no runner WebSocket; instead a local stand-in backed by an
+ * InMemoryAgentRunner drives headless turns in-process. That runner's thread store is
+ * process-global, so routine turns and browser turns share history while the process lives —
+ * and lose it together when it restarts. See LOCAL-MODE.md.
  */
-const routineIntelligence = observeIntelligenceAuthentication(
-  new CopilotKitIntelligence({
-    apiUrl: config.runtime.intelligence.apiUrl,
-    wsUrl: config.runtime.intelligence.gatewayWsUrl,
-    apiKey: config.runtime.intelligence.apiKey,
-  }),
-);
-const routineAgentRunner = new IntelligenceAgentRunner({
-  url: routineIntelligence.ɵgetRunnerWsUrl(),
-  authToken: routineIntelligence.ɵgetRunnerAuthToken(),
-});
+const routineIntelligence =
+  config.runtime.mode === "local"
+    ? createLocalIntelligence()
+    : observeIntelligenceAuthentication(
+        new CopilotKitIntelligence({
+          apiUrl: config.runtime.intelligence.apiUrl,
+          wsUrl: config.runtime.intelligence.gatewayWsUrl,
+          apiKey: config.runtime.intelligence.apiKey,
+        }),
+      );
+const routineAgentRunner =
+  config.runtime.mode === "local"
+    ? // A fresh instance is fine: the in-memory thread store is process-global,
+      // so this runner and the chat runtime's runner share the same threads.
+      new InMemoryAgentRunner()
+    : new IntelligenceAgentRunner({
+        url: (routineIntelligence as CopilotKitIntelligence).ɵgetRunnerWsUrl(),
+        authToken: (
+          routineIntelligence as CopilotKitIntelligence
+        ).ɵgetRunnerAuthToken(),
+      });
 
 const routineRunner = createRoutineRunner({
   routineStore,
@@ -2717,9 +2735,12 @@ if (config.handoff.maxDepth > 0 && config.handoff.maxPerRun > 0) {
       // The same address and the same token the runtime uses. Assembling either from configuration
       // produced a runner every join was refused for, because the thread's active run is a lock the
       // platform issues rather than something an API key can claim.
-      runner: new IntelligenceAgentRunner(
-        copilotRuntime.runnerConnection(),
-      ) as never,
+      // Local mode: no platform and no socket — the runtime's own in-process runner.
+      runner: (config.runtime.mode === "local"
+        ? copilotRuntime.localRunner
+        : new IntelligenceAgentRunner(
+            copilotRuntime.runnerConnection(),
+          )) as never,
     }),
   });
 
@@ -2884,9 +2905,10 @@ auditRoutineStore(routineStore, bootAuditStore);
 
 // Asked only whether this deployment pays for Intelligence, for the self-host banner. Its own client
 // rather than the runtime's, the same as the thread reader: the constructor opens nothing.
-const selfHostBannerIntelligence = createIntelligenceClient(
-  config.runtime.intelligence,
-);
+// Local mode has no Intelligence and no entitlement to ask about, so no client is built.
+const selfHostBannerIntelligence = config.runtime.intelligence
+  ? createIntelligenceClient(config.runtime.intelligence)
+  : undefined;
 
 const identityGithubCallback =
   config.githubApp && config.publicUrl
@@ -3088,8 +3110,15 @@ const app = createApp(
     },
   },
   createSelfHostBanner({
-    enabled: config.selfHostBanner,
-    entitlements: () => selfHostBannerIntelligence.getRuntimeEntitlements(),
+    // Local mode: the banner offers paid self-hosting help for Intelligence,
+    // which a local fork is not using; keep it off rather than faking an entitlement.
+    enabled: config.selfHostBanner && config.runtime.mode !== "local",
+    entitlements: () => {
+      if (!selfHostBannerIntelligence) {
+        throw new Error("Local mode has no Intelligence entitlement.");
+      }
+      return selfHostBannerIntelligence.getRuntimeEntitlements();
+    },
   }),
 
   identityStore,

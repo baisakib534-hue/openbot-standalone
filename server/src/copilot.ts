@@ -5,6 +5,7 @@ import {
   BuiltInAgent,
   CopilotKitIntelligence,
   CopilotRuntime,
+  InMemoryAgentRunner,
 } from "@copilotkit/runtime/v2";
 import { createCopilotHonoHandler } from "@copilotkit/runtime/v2/hono";
 import type { Observable } from "rxjs";
@@ -40,6 +41,10 @@ import type { DeploymentConfig } from "./config";
 import { observeModelConnection } from "./desktop-connection-failure";
 import { desktopTelemetryProperties } from "./desktop-telemetry";
 import { observeIntelligenceAuthentication } from "./intelligence-client";
+import {
+  createLocalIntelligence,
+  type LocalIntelligence,
+} from "./local-intelligence";
 import { RemoteLearnedSkillsMiddleware } from "./learning/remote";
 import {
   type AcquireLearnedSkills,
@@ -71,10 +76,14 @@ import { UNTRUSTED_GUIDANCE } from "./untrusted-content";
  * with no framework adapter here: LangGraph, Pydantic-AI, CrewAI, Mastra, ADK, or a hand-written
  * server.
  *
- * There is no SSE branch. Intelligence is a requirement of the product, not a tier: it owns
- * durable threads, memory and learning, and a deployment without it silently forgets every
- * conversation. config.ts refuses to boot without the full contract, so by the time this runs the
- * settings are present and this file has one mode.
+ * There is no SSE branch in Intelligence mode. Intelligence is a requirement of the product, not
+ * a tier: it owns durable threads, memory and learning, and a deployment without it silently
+ * forgets every conversation. config.ts refuses to boot without the full contract, so by the
+ * time this runs in Intelligence mode the settings are present.
+ *
+ * LOCAL MODE (OPENBOT_LOCAL_MODE=true, see LOCAL-MODE.md) is the one exception: the runtime is
+ * built with an InMemoryAgentRunner instead of Intelligence, history lives only in this process,
+ * thread locks are in-process no-ops beyond a single-instance guard, and learning is off.
  */
 
 /** Resolve the signed-in person for a request. Threads and memory are scoped to whoever this returns. */
@@ -2046,8 +2055,22 @@ export function mountCopilotRuntime(
     learningSettings?: LearningSettingsStore;
   } = {},
 ) {
-  const { intelligence } = config.runtime;
+  const localMode = config.runtime.mode === "local";
+  const intelligence = config.runtime.intelligence;
+  if (!localMode && !intelligence) {
+    throw new Error(
+      "Intelligence mode requires the Intelligence contract; config.ts should have refused to boot.",
+    );
+  }
   const { basePath = "/api/copilotkit", onRunBusy, learningSettings } = options;
+  if (localMode) {
+    console.info(
+      JSON.stringify({
+        type: "openbot-local-mode",
+        note: "CopilotKit Intelligence is disabled: thread history is in-memory only, memory/learning are off, and headless routines run in-process. See LOCAL-MODE.md.",
+      }),
+    );
+  }
 
   /**
    * The same Bot a person's run would get, built without a request.
@@ -2086,36 +2109,48 @@ export function mountCopilotRuntime(
    * One client, used by the runtime and by anything reading a thread beside it, so a hop reads the
    * history a person's run would read rather than a second view of it that could disagree.
    */
-  const intelligenceClient: CopilotKitIntelligence =
-    observeIntelligenceAuthentication(
-      new IntelligenceKnowingANewThread({
-        apiUrl: intelligence.apiUrl,
-        wsUrl: intelligence.gatewayWsUrl,
-        apiKey: intelligence.apiKey,
-        getLearningContainerId: async ({
-          agentId,
-          input,
-          user,
-        }): Promise<string | undefined> => {
-          if (!user)
-            throw new Error(
-              "Learning Thread assignment requires a verified user.",
-            );
-          return learning?.containerForThread({
-            agentId,
-            threadId: input.threadId,
-            userId: user.id,
-          });
-        },
-      }),
-    );
-
-  const learning: LearningRuntime | undefined = learningSettings
-    ? createLearningRuntime({
-        store: learningSettings,
-        client: intelligenceClient,
-      })
+  /*
+   * Local mode: one in-memory runner for the chat runtime, and a local
+   * stand-in (backed by the same process-global runner store) for every
+   * direct client call below. Intelligence mode keeps the real client.
+   */
+  const localRunner = localMode ? new InMemoryAgentRunner() : undefined;
+  const localIntelligence: LocalIntelligence | undefined = localRunner
+    ? createLocalIntelligence(localRunner)
     : undefined;
+
+  const intelligenceClient: CopilotKitIntelligence | undefined = intelligence
+    ? observeIntelligenceAuthentication(
+        new IntelligenceKnowingANewThread({
+          apiUrl: intelligence.apiUrl,
+          wsUrl: intelligence.gatewayWsUrl,
+          apiKey: intelligence.apiKey,
+          getLearningContainerId: async ({
+            agentId,
+            input,
+            user,
+          }): Promise<string | undefined> => {
+            if (!user)
+              throw new Error(
+                "Learning Thread assignment requires a verified user.",
+              );
+            return learning?.containerForThread({
+              agentId,
+              threadId: input.threadId,
+              userId: user.id,
+            });
+          },
+        }),
+      )
+    : undefined;
+
+  const learning: LearningRuntime | undefined =
+    learningSettings && intelligenceClient
+      ? createLearningRuntime({
+          store: learningSettings,
+          client: intelligenceClient,
+        })
+      : undefined;
 
   const runtime = new CopilotRuntime({
     // `mode` is inferred from the presence of `intelligence`; passing it is a type error.
@@ -2124,10 +2159,18 @@ export function mountCopilotRuntime(
     // returns, so omitting it puts every person in the deployment in the same thread space and one
     // person's conversations become another's.
     identifyUser,
-    // The subclass, not the base: a thread nobody has run yet reads as empty rather than as a 500.
-    // See IntelligenceKnowingANewThread.
-    intelligence: intelligenceClient,
-    licenseToken: intelligence.licenseToken,
+    ...(localMode
+      ? {
+          // SSE mode: threads run and persist (in memory) through this runner,
+          // and the handler serves thread history from it. No Intelligence.
+          runner: localRunner as InMemoryAgentRunner,
+        }
+      : {
+          // The subclass, not the base: a thread nobody has run yet reads as empty rather than as a 500.
+          // See IntelligenceKnowingANewThread.
+          intelligence: intelligenceClient as CopilotKitIntelligence,
+          licenseToken: intelligence?.licenseToken,
+        }),
     // Carried on the events the runtime already sends, so OpenBot's traffic is separable from any
     // other deployment's. Adds no events of its own.
     telemetryProperties: {
@@ -2171,10 +2214,23 @@ export function mountCopilotRuntime(
      * the token that holds it is not the API key. The runtime asks the client for both, so anything
      * else driving a run has to ask the same client the same way.
      */
-    runnerConnection: () => ({
-      url: intelligenceClient.ɵgetRunnerWsUrl(),
-      authToken: intelligenceClient.ɵgetRunnerAuthToken(),
-    }),
+    runnerConnection: () => {
+      if (!intelligenceClient) {
+        throw new Error(
+          "Local mode has no Intelligence runner connection; use localRunner for headless turns.",
+        );
+      }
+      return {
+        url: intelligenceClient.ɵgetRunnerWsUrl(),
+        authToken: intelligenceClient.ɵgetRunnerAuthToken(),
+      };
+    },
+    /**
+     * The in-process runner headless turns use in local mode. Its store is the
+     * process-global in-memory store, so it sees the chat runtime's threads.
+     * Undefined in Intelligence mode, where `runnerConnection()` is the path.
+     */
+    localRunner,
     /**
      * The conversation's run lock, as the platform issues it.
      *
@@ -2194,6 +2250,17 @@ export function mountCopilotRuntime(
         agentId: string;
       }) => {
         try {
+          if (localIntelligence) {
+            // Local locks: an in-process guard only (single-instance assumption).
+            const held = await localIntelligence.ɵacquireThreadLock(input);
+            try {
+              onRunBusy?.({ threadId: input.threadId, busy: true });
+            } catch {}
+            return { runId: held.runId };
+          }
+          if (!intelligenceClient) {
+            throw new Error("No thread lock backend is configured.");
+          }
           const learningContainerId = await learning?.containerForThread(input);
           await intelligenceClient.getOrCreateThread({
             ...input,
@@ -2238,6 +2305,14 @@ export function mountCopilotRuntime(
         }
       },
       renew: async (input: { threadId: string; runId: string }) => {
+        if (localIntelligence) {
+          await localIntelligence.ɵrenewThreadLock({
+            ...input,
+            ttlSeconds: THREAD_LOCK_TTL_SECONDS,
+          });
+          return;
+        }
+        if (!intelligenceClient) return;
         await intelligenceClient.ɵrenewThreadLock({
           ...input,
           ttlSeconds: THREAD_LOCK_TTL_SECONDS,
@@ -2249,6 +2324,11 @@ export function mountCopilotRuntime(
         try {
           onRunBusy?.({ threadId: input.threadId, busy: false });
         } catch {}
+        if (localIntelligence) {
+          await localIntelligence.ɵcleanupThreadLock(input);
+          return;
+        }
+        if (!intelligenceClient) return;
         await intelligenceClient.ɵcleanupThreadLock(input);
       },
     },
@@ -2268,6 +2348,14 @@ export function mountCopilotRuntime(
       type Read = Awaited<
         ReturnType<CopilotKitIntelligence["getThreadMessages"]>
       >;
+      if (localIntelligence) {
+        const local = await localIntelligence.getThreadMessages({
+          threadId: input.threadId,
+          userId: input.actorId,
+        });
+        return local.messages as unknown as Read["messages"];
+      }
+      if (!intelligenceClient) return [];
       const read = await historyOrEmpty<Read>(
         () =>
           intelligenceClient.getThreadMessages({
