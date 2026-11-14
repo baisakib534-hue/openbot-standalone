@@ -13,6 +13,13 @@ server) registered **as data** — no code edit, no rebuild of the loaders. Both
 (the TypeScript one and the Python one) read the same overlay, so a provider registered once is
 visible to every Bot.
 
+The overlay has three sources, in this precedence order: **`CUSTOM_PROVIDERS_JSON` (environment)
+> the Postgres `custom_providers` table > the overlay file**. A dashboard-set environment row
+always wins, a provider added from chat (the table) beats the file, and a built-in provider id
+can never be redefined by any source. On every boot the server merges the three sources and
+writes the result back to the overlay file, so the loaders in other processes — which cannot
+read the server's database — see the database rows too.
+
 Each provider row has:
 
 | Field | Meaning | Example |
@@ -43,13 +50,32 @@ mounted volume), point `CUSTOM_PROVIDERS_PATH` at it. When both sources name the
 environment JSON wins. An optional `"bots"` section in the overlay can point a named Bot at a
 custom provider, e.g. `"bots": {"agent-langgraph": {"provider": "9router", "model": "auto:default"}}`.
 
-### Way C — ask the Bot
+### Way C — ask the Bot (durable, self-contained)
 
 With Platform Tools granted (§4): *"Add 9router as a provider: base URL
-https://ninerouter-vzw3.onrender.com/v1, key in NINEROUTER_API_KEY, default model
-auto:default."* The Bot calls `add_custom_provider`, which appends the row to the overlay file
-(the `CUSTOM_PROVIDERS_PATH` file when set). Loaders read the overlay at startup, so the
-provider is selectable from the **next server start** — set `BOT_PROVIDER=9router` and restart.
+https://ninerouter-vzw3.onrender.com/v1, default model auto:default, here is the API key: …"*
+The Bot calls `add_custom_provider`, which stores the row in the **Postgres `custom_providers`
+table** — not in a file on the server's disk — so the provider **survives restarts and
+redeploys**, including on hosts with an ephemeral filesystem (e.g. Render's free tier), with
+**zero dashboard or environment edits**. On the next boot the server merges the table into the
+overlay and materializes it for both loaders automatically.
+
+The key has two ways in:
+
+- **Give the key itself** (`api_key` in the ask). It is stored **encrypted in the credential
+  vault** — the same KEY_ENCRYPTION_KEY-backed store as every other credential — under
+  coordinates derived from the provider id (kind `model`, provider `custom-provider`, keyId =
+  the provider id). The plaintext never lands in the provider row, the overlay file, a log, or
+  the tool result. `key_variable` may be omitted in this form; a fallback variable name is
+  derived from the id (e.g. `PROVIDER_9ROUTER_API_KEY`). At call time, resolution reads the
+  environment variable first when it holds a value, and the stored key otherwise.
+- **Or name the variable** (`key_variable`, no key in chat) — the original behaviour, unchanged:
+  the key is read from that environment variable only.
+
+One honest limit: the provider is registered in the running server's registry immediately,
+but the deployment's selected model is built at startup and is not switched mid-run — so the
+provider becomes selectable (`BOT_PROVIDER=9router`) from the **next server start**. On hosts
+that spin down when idle, that is simply the next natural wake; no redeploy is needed.
 
 ## 2. Add an MCP server
 
@@ -102,7 +128,7 @@ classified as **writes**:
 |---|---|---|
 | `add_mcp_server` | Register a custom MCP server | Plugins page → Add by URL |
 | `install_skill` | Create a personal or deployment skill | Plugins page → skill form |
-| `add_custom_provider` | Append a provider to the overlay file | Editing `providers.local.json` |
+| `add_custom_provider` | Store a provider durably in Postgres; with a key, store it encrypted in the vault | The overlay sources in §1 (database row) |
 | `add_agent` | Create a coworker, optionally with tool grants | Team page → Add coworker (no endpoint) |
 
 ### Grant it to your Bot (once, administrator)

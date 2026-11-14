@@ -154,6 +154,12 @@ import {
   createCredentialStore,
   resolveModelApiKey,
 } from "./credentials";
+import {
+  createCustomProviderStore,
+  CustomProviderRegistry,
+  registerChatCustomProvider,
+  syncCustomProvidersOverlay,
+} from "./providers/custom-providers";
 import { createDatabase } from "./db/client";
 import {
   channelAgents,
@@ -199,10 +205,6 @@ import { createPasswordStore } from "./passwords/store";
 import { createOnboardingStore } from "./people/onboarding";
 import { createPeopleStore } from "./people/store";
 import { createAccountModeSwitch } from "./plugins/account-mode";
-import {
-  providerSpec,
-  upsertCustomProviderFile,
-} from "../../shared/model-providers";
 import { usePlatformTools } from "./plugins/builtin-platform";
 import { useRoutineTools } from "./plugins/builtin-routines";
 import { useComposioClient } from "./plugins/composio";
@@ -358,6 +360,20 @@ await initializeDevActorUser(database, config.singleUser);
 // The vault, built before the agent store because a customer's agent may sit behind a key and that
 // key belongs here rather than on the agent row. See agents/auth-header.ts.
 const credentialStore = createCredentialStore(database);
+/*
+ * Durable custom providers, merged before anything resolves a model.
+ *
+ * The database rows are the source that survives an ephemeral filesystem: they are merged
+ * between the overlay file and `CUSTOM_PROVIDERS_JSON` (env > DB > file), materialized back to
+ * the overlay file for the loaders in other processes, and installed in the registry the
+ * runtime-model lookup below reads — the shared loader's own registry was fixed at import time,
+ * before this database existed. A materialization failure warns and continues: this registry
+ * still holds the merged rows, so the server is whole; only other processes would miss them.
+ */
+const customProviderStore = createCustomProviderStore(database);
+const customProviderRegistry = new CustomProviderRegistry(
+  (await syncCustomProvidersOverlay({ store: customProviderStore })).overlay,
+);
 const identityStore = createIdentityStore(database, credentialStore);
 const agentVault = {
   store: credentialStore,
@@ -904,18 +920,30 @@ usePlatformTools({
     });
     return { slug: input.slug };
   },
-  addCustomProvider: async (input) => {
-    const path = upsertCustomProviderFile({
-      id: input.id,
-      label: input.label,
-      baseUrl: input.baseUrl,
-      keyVariable: input.keyVariable,
-      defaultModel: input.defaultModel,
-      api: "chat",
-    });
-    return { id: input.id, path };
+  addCustomProvider: async (actorId, input) => {
+    const outcome = await registerChatCustomProvider(
+      {
+        store: customProviderStore,
+        credentialAdmin: platformCredentialAdmin,
+      },
+      {
+        actorId,
+        actorLabel: await platformActorEmail(actorId),
+        id: input.id,
+        label: input.label,
+        baseUrl: input.baseUrl,
+        ...(input.keyVariable ? { keyVariable: input.keyVariable } : {}),
+        ...(input.apiKey ? { apiKey: input.apiKey } : {}),
+        defaultModel: input.defaultModel,
+      },
+    );
+    // The registry learns the provider at once (so add_agent can name it in this same run);
+    // the runtime model built at boot is deliberately not rebuilt — see the tool's own result.
+    customProviderRegistry.replace(outcome.overlay);
+    const { overlay: _overlay, ...result } = outcome;
+    return result;
   },
-  providerExists: (id) => providerSpec(id) !== undefined,
+  providerExists: (id) => customProviderRegistry.exists(id),
   addAgent: async (actorId, input) => {
     // Resolve the grants before anything is written: a name that matches no added server refuses
     // the whole call, rather than leaving a coworker created and half-granted behind it.
@@ -1161,7 +1189,11 @@ const stallGuard = createStallGuard({
 });
 
 normalizeModelBaseUrls();
-const runtimeModel = runtimeModelForEnvironment(tenantPackage.model);
+const runtimeModel = runtimeModelForEnvironment(
+  tenantPackage.model,
+  process.env,
+  (provider) => customProviderRegistry.lookup(provider),
+);
 /*
  * A custom provider's endpoint reaches the built-in Bots' SDK the way any named endpoint does:
  * through OPENAI_BASE_URL, which is the variable that SDK reads. Selecting the provider by name
@@ -1182,6 +1214,7 @@ const intentRouter = createIntentRouter({
         reader: credentialStore,
         provider: runtimeModel.provider,
         keyVariable: runtimeModel.customProvider?.keyVariable,
+        customProviderId: runtimeModel.customProvider?.id,
         keyId: tenantPackage.model.credentialSecretRef,
         environment: process.env,
       }),
@@ -1202,6 +1235,7 @@ const chooseSkills = createModelCompleter({
       reader: credentialStore,
       provider: runtimeModel.provider,
       keyVariable: runtimeModel.customProvider?.keyVariable,
+      customProviderId: runtimeModel.customProvider?.id,
       keyId: tenantPackage.model.credentialSecretRef,
       environment: process.env,
     }),
@@ -1216,6 +1250,7 @@ const resolveRuntimeModelApiKey = () =>
     reader: credentialStore,
     provider: runtimeModel.provider,
     keyVariable: runtimeModel.customProvider?.keyVariable,
+    customProviderId: runtimeModel.customProvider?.id,
     keyId: tenantPackage.model.credentialSecretRef,
     environment: process.env,
   });

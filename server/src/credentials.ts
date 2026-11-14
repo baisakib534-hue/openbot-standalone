@@ -130,10 +130,26 @@ export type CredentialStatusReader = {
 
 export type ModelCredentialSecretReader = {
   readModelSecret: (input: {
-    provider: "openai" | "anthropic";
+    provider: string;
     keyId: string;
   }) => Promise<{ encryptedValue: string } | null>;
 };
+
+/**
+ * Where a custom provider's own key lives in the vault.
+ *
+ * The coordinates are derived from the provider id alone — kind `model`, provider
+ * `custom-provider`, keyId the provider's id — so resolution needs nothing but the registry row
+ * it already has, and a key stored for one provider can never be read for another. Distinct from
+ * the tenant package's credential coordinates (`provider` openai/anthropic, keyId the package's
+ * `credential_secret_ref`): those keys belong to the package's endpoint, not to an endpoint a
+ * chat add registered later.
+ */
+export const CUSTOM_PROVIDER_CREDENTIAL_PROVIDER = "custom-provider";
+
+export function customProviderCredentialKeyId(providerId: string): string {
+  return providerId.trim().toLowerCase();
+}
 
 type CredentialService = {
   encryptionKey: string;
@@ -263,12 +279,36 @@ export async function resolveModelApiKey(input: {
   keyId: string;
   environment: Record<string, string | undefined>;
   /**
-   * The variable a custom provider's key arrives in. When set, the key is environment-only:
-   * the stored credential belongs to the tenant package's own provider and key id, and reading
-   * it for an endpoint it was never stored for would spend the wrong key at the wrong host.
+   * The variable a custom provider's key arrives in. The environment still wins when it holds a
+   * value; what changed is the fallback. Without a `customProviderId` there is none — the stored
+   * credential belongs to the tenant package's own provider and key id, and reading it for an
+   * endpoint it was never stored for would spend the wrong key at the wrong host.
    */
   keyVariable?: string;
+  /**
+   * The custom provider this key is for, when one is selected. Its vault fallback is the
+   * credential stored under the coordinates {@link customProviderCredentialKeyId} derives from
+   * this id — the key `add_custom_provider` stored when the provider was registered with one.
+   */
+  customProviderId?: string;
 }) {
+  const environmentKey =
+    input.environment[
+      input.keyVariable ??
+        (input.provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY")
+    ]?.trim();
+
+  if (input.customProviderId) {
+    if (environmentKey) return environmentKey;
+    const stored = await input.reader.readModelSecret({
+      provider: CUSTOM_PROVIDER_CREDENTIAL_PROVIDER,
+      keyId: customProviderCredentialKeyId(input.customProviderId),
+    });
+    return stored
+      ? decryptSecret(input.encryptionKey, stored.encryptedValue)
+      : null;
+  }
+
   if (!input.keyVariable) {
     const stored = await input.reader.readModelSecret({
       provider: input.provider,
@@ -279,11 +319,6 @@ export async function resolveModelApiKey(input: {
     }
   }
 
-  const environmentKey =
-    input.environment[
-      input.keyVariable ??
-        (input.provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY")
-    ]?.trim();
   return environmentKey || null;
 }
 

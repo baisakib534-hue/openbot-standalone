@@ -593,6 +593,46 @@ describe("custom providers for the built-in Bots", () => {
     ).toBeNull();
   });
 
+  test("a custom provider with no env key falls back to its own vault credential", async () => {
+    const asked: unknown[] = [];
+    const customEnvelope = await encryptSecret(encryptionKey, "vault-router-key");
+    const reader = {
+      readModelSecret: async (input: { provider: string; keyId: string }) => {
+        asked.push(input);
+        return input.provider === "custom-provider" && input.keyId === "9router"
+          ? { encryptedValue: customEnvelope }
+          : { encryptedValue: await encryptSecret(encryptionKey, "package-key") };
+      },
+    };
+    // Environment wins over the vault when it holds a value.
+    expect(
+      await resolveModelApiKey({
+        encryptionKey,
+        provider: "openai",
+        keyId: "primary-model",
+        keyVariable: "NINEROUTER_API_KEY",
+        customProviderId: "9router",
+        reader,
+        environment: { NINEROUTER_API_KEY: " env-router-key " },
+      }),
+    ).toBe("env-router-key");
+    expect(asked).toEqual([]);
+    // No env value: the provider's own stored key — never the package credential,
+    // which the reader would have answered for any other coordinates.
+    expect(
+      await resolveModelApiKey({
+        encryptionKey,
+        provider: "openai",
+        keyId: "primary-model",
+        keyVariable: "NINEROUTER_API_KEY",
+        customProviderId: "9router",
+        reader,
+        environment: {},
+      }),
+    ).toBe("vault-router-key");
+    expect(asked).toEqual([{ provider: "custom-provider", keyId: "9router" }]);
+  });
+
   test("the router completer calls the custom provider's own chat completions URL", async () => {
     const seen: { url?: string; authorization?: string | null } = {};
     const originalFetch = globalThis.fetch;

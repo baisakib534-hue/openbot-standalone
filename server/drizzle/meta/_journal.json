@@ -386,6 +386,13 @@
       "when": 1794679198900,
       "tag": "0054_spaces",
       "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1794681323863,
+      "tag": "0055_custom_providers",
+      "breakpoints": true
     }
   ]
 }

@@ -76,7 +76,8 @@ Leave every `INTELLIGENCE_*` / `CPK_INTELLIGENCE_*` variable unset.
 
 Local mode changes how the runtime mounts; everything else in this fork works the same in
 both modes. Custom model providers are registered as data (an overlay both provider loaders
-read — `CUSTOM_PROVIDERS_JSON` or `providers.local.json`), and a built-in **Platform Tools**
+read — `CUSTOM_PROVIDERS_JSON`, the Postgres `custom_providers` table, or
+`providers.local.json`), and a built-in **Platform Tools**
 server lets an administrator grant a Bot four governed write tools — `add_mcp_server`,
 `install_skill`, `add_custom_provider`, `add_agent` — so all of it can also be done by asking
 the Bot in chat. See **FEATURES.md** for the plain steps, exact env names and grant flow.

@@ -16,6 +16,7 @@ export * from "./memory";
 export * from "./passwords";
 export * from "./plugins";
 export * from "./proactive";
+export * from "./providers";
 export * from "./responsibilities";
 export * from "./scim";
 export * from "./shared-use";

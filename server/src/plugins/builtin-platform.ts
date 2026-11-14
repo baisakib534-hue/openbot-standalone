@@ -28,8 +28,12 @@ import { MAX_RESULT_CHARS, type McpCallResult, type McpTool } from "./mcp";
 /** What one add-custom-provider call resolved to, in words the result can repeat. */
 export type CustomProviderOutcome = {
   id: string;
-  /** Where the overlay row was written, so the answer can name the store that now holds it. */
-  path: string;
+  /** The key variable the registry row names — given, or derived when a key was supplied. */
+  keyVariable: string;
+  /** Whether an API key was stored encrypted in the credential vault for this provider. */
+  credentialStored: boolean;
+  /** Where the merged overlay was materialized for the other loaders, when that write landed. */
+  materializedPath?: string;
 };
 
 export type PlatformTools = {
@@ -72,17 +76,25 @@ export type PlatformTools = {
     },
   ): Promise<{ slug: string }>;
   /**
-   * Append one provider to the overlay store the model-provider loaders read
-   * (`upsertCustomProviderFile` in shared/model-providers). Validation is the loaders' own, so a
-   * row written here is a row both loaders accept.
+   * Register one provider in the durable database overlay (the `custom_providers` table), then
+   * materialize the merged overlay for the loaders. Validation is the loaders' own, so a row
+   * written here is a row both loaders accept. `apiKey`, when given, is stored encrypted in the
+   * credential vault under coordinates derived from the provider id — it never lands in the
+   * provider row, the materialized file, or any result — and `keyVariable` may then be omitted
+   * (a fallback variable name is derived). Without `apiKey`, `keyVariable` names the environment
+   * variable the key arrives in, exactly as before.
    */
-  addCustomProvider(input: {
-    id: string;
-    label: string;
-    baseUrl: string;
-    keyVariable: string;
-    defaultModel: string;
-  }): Promise<CustomProviderOutcome>;
+  addCustomProvider(
+    actorId: string,
+    input: {
+      id: string;
+      label: string;
+      baseUrl: string;
+      keyVariable?: string;
+      defaultModel: string;
+      apiKey?: string;
+    },
+  ): Promise<CustomProviderOutcome>;
   /** Whether a provider id is registered — a built-in, or an overlay row the loaders accepted. */
   providerExists(id: string): boolean;
   /**
@@ -197,14 +209,18 @@ const TOOLS: readonly McpTool[] = Object.freeze([
     name: "add_custom_provider",
     description: [
       "Register a custom OpenAI-compatible model provider, as data: an id, the endpoint it answers",
-      "on, the environment variable its API key arrives in, and a default model. This appends one",
-      "row to the provider overlay both model-provider loaders read (the file CUSTOM_PROVIDERS_PATH",
-      "names, or providers.local.json beside the provider spec), so no code changes and both the",
-      "TypeScript and Python loaders see it. The key itself is never an argument — only the NAME of",
-      "the variable holding it.",
+      "on, and a default model, plus its key — either `api_key` itself, or `key_variable` naming",
+      "the environment variable it arrives in. The row is stored durably in the deployment's",
+      "Postgres database and materialized to the overlay both model-provider loaders read, so it",
+      "survives restarts and redeploys with no code changes and no dashboard edits. An `api_key`",
+      "is stored ENCRYPTED in the credential vault under a name derived from the provider id; it",
+      "never appears in the provider row, the overlay file, or any result. When `api_key` is",
+      "given, `key_variable` may be omitted (a name is derived); an environment value under the",
+      "key variable still wins over the stored key when both exist.",
       "",
-      "The running server reads the overlay when it starts, so the new provider can be selected",
-      "(BOT_PROVIDER=<id>) from the next start; say so when you report it added.",
+      "The provider is registered in the running server's registry at once, but the deployment's",
+      "selected model is built at startup, so it can be selected (BOT_PROVIDER=<id>) from the",
+      "next server start; say so when you report it added.",
     ].join("\n"),
     inputSchema: {
       type: "object",
@@ -220,14 +236,19 @@ const TOOLS: readonly McpTool[] = Object.freeze([
         },
         key_variable: {
           type: "string",
-          description: "The environment variable the API key arrives in, e.g. NINEROUTER_API_KEY.",
+          description: "The environment variable the API key arrives in, e.g. NINEROUTER_API_KEY. Optional when api_key is given.",
+        },
+        api_key: {
+          type: "string",
+          description:
+            "The provider's API key itself. Stored encrypted in the credential vault; never written to the provider row or overlay file, and never repeated back.",
         },
         default_model: {
           type: "string",
           description: "The model Bots get when none is named, e.g. auto:default.",
         },
       },
-      required: ["id", "label", "base_url", "key_variable", "default_model"],
+      required: ["id", "label", "base_url", "default_model"],
     },
   },
   {
@@ -494,21 +515,29 @@ export async function callTool(
       const label = stringArg(args, "label");
       const baseUrl = stringArg(args, "base_url");
       const keyVariable = stringArg(args, "key_variable");
+      const apiKey = stringArg(args, "api_key");
       const defaultModel = stringArg(args, "default_model");
-      if (!id || !label || !baseUrl || !keyVariable || !defaultModel) {
+      if (!id || !label || !baseUrl || !defaultModel || (!keyVariable && !apiKey)) {
         return failure(
-          "A provider needs an id, a label, a base_url, the key_variable its key arrives in, and a default_model.",
+          "A provider needs an id, a label, a base_url, a default_model, and its key: either api_key itself or the key_variable its key arrives in.",
         );
       }
-      const outcome = await tools.addCustomProvider({
+      const outcome = await tools.addCustomProvider(actorId, {
         id,
         label,
         baseUrl,
-        keyVariable,
+        ...(keyVariable ? { keyVariable } : {}),
+        ...(apiKey ? { apiKey } : {}),
         defaultModel,
       });
+      const materialized = outcome.materializedPath
+        ? ` The merged overlay was also written to ${outcome.materializedPath}, so the Python and separate-process loaders see it too.`
+        : " The overlay file could not be written, so separate-process loaders will pick it up once that path is writable; the server registry and the database copy are in place.";
+      const keyNote = outcome.credentialStored
+        ? `Its API key is stored encrypted in the credential vault (never in the provider row or the overlay file); key resolution reads ${outcome.keyVariable} from the environment first, then the stored key.`
+        : `Its key is read from ${outcome.keyVariable} — make sure that variable is set in the deployment's environment.`;
       return asResult(
-        `${label} is registered as provider "${outcome.id}" in ${outcome.path}. Both loaders accept it from the next server start, and Bots can then be pointed at it with BOT_PROVIDER=${outcome.id}. Its key is read from ${keyVariable} — make sure that variable is set in the deployment's environment.`,
+        `${label} is registered as provider "${outcome.id}", stored durably in the Postgres custom_providers table — it survives restarts and redeploys with no dashboard or environment edits.${materialized} ${keyNote} It is active from the next server start: point the deployment at it with BOT_PROVIDER=${outcome.id} (the running server does not switch its selected model mid-run).`,
       );
     }
 

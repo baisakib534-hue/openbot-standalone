@@ -36,9 +36,14 @@ function stub(overrides: Partial<PlatformTools> = {}): {
       calls.push({ method: "installSkill", input });
       return { slug: input.slug };
     },
-    addCustomProvider: async (input) => {
+    addCustomProvider: async (_actorId, input) => {
       calls.push({ method: "addCustomProvider", input });
-      return { id: input.id, path: "/deploy/providers.local.json" };
+      return {
+        id: input.id,
+        keyVariable: input.keyVariable ?? "DERIVED_API_KEY",
+        credentialStored: input.apiKey !== undefined,
+        materializedPath: "/deploy/providers.local.json",
+      };
     },
     providerExists: (id) => id === "9router" || id === "openai",
     addAgent: async (_actorId, input) => {
@@ -203,7 +208,7 @@ describe("install_skill", () => {
 });
 
 describe("add_custom_provider", () => {
-  test("dispatches the row and reports where it landed and the restart caveat", async () => {
+  test("dispatches the row and reports durable storage and the restart caveat", async () => {
     const { tools, calls } = stub();
     usePlatformTools(tools);
     const result = await callTool(CONNECTION, "add_custom_provider", {
@@ -214,8 +219,10 @@ describe("add_custom_provider", () => {
       default_model: "auto:default",
     });
     expect(result.isError).toBe(false);
+    expect(result.text).toContain("custom_providers");
     expect(result.text).toContain("/deploy/providers.local.json");
     expect(result.text).toContain("BOT_PROVIDER=9router");
+    expect(result.text).toContain("next server start");
     expect(calls).toEqual([
       {
         method: "addCustomProvider",
@@ -230,6 +237,33 @@ describe("add_custom_provider", () => {
     ]);
   });
 
+  test("an api_key is passed to the store and never repeated in the result", async () => {
+    const { tools, calls } = stub();
+    usePlatformTools(tools);
+    const result = await callTool(CONNECTION, "add_custom_provider", {
+      id: "acme",
+      label: "Acme",
+      base_url: "https://acme.example/v1",
+      api_key: "acme-secret-value",
+      default_model: "acme-1",
+    });
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain("encrypted in the credential vault");
+    expect(result.text).not.toContain("acme-secret-value");
+    expect(calls).toEqual([
+      {
+        method: "addCustomProvider",
+        input: {
+          id: "acme",
+          label: "Acme",
+          baseUrl: "https://acme.example/v1",
+          apiKey: "acme-secret-value",
+          defaultModel: "acme-1",
+        },
+      },
+    ]);
+  });
+
   test("a missing field is refused before the store", async () => {
     const { tools, calls } = stub();
     usePlatformTools(tools);
@@ -238,6 +272,20 @@ describe("add_custom_provider", () => {
       label: "9router",
     });
     expect(result.isError).toBe(true);
+    expect(calls).toEqual([]);
+  });
+
+  test("no key and no key variable is refused before the store", async () => {
+    const { tools, calls } = stub();
+    usePlatformTools(tools);
+    const result = await callTool(CONNECTION, "add_custom_provider", {
+      id: "9router",
+      label: "9router",
+      base_url: "https://ninerouter-vzw3.onrender.com/v1",
+      default_model: "auto:default",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("either api_key itself or the key_variable");
     expect(calls).toEqual([]);
   });
 });

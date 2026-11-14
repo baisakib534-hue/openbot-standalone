@@ -285,27 +285,43 @@ export function customProvidersFilePath(
 }
 
 /**
- * The overlay this process runs with: file first, `CUSTOM_PROVIDERS_JSON` over it, so an
- * environment can restate one provider without restating them all. Absent both, an empty overlay
- * — the registry stays the three built-in rows and nothing about the base file's checks changes.
- *
- * A file that exists but does not parse stops startup like a bad base row; a file that does not
- * exist is simply no overlay, because the file is how a deployment opts in.
+ * The key variable a chat-added provider gets when its key is supplied directly and no variable
+ * was named. The variable is only the registry row's fallback name: the actual key is stored in
+ * the credential vault, and an environment value under this name still wins if one is later set.
  */
-function readOverlay(
-  env: Readonly<Record<string, string | undefined>>,
+export function defaultKeyVariableForCustomProvider(id: string): string {
+  const derived = `${id.toUpperCase().replace(/-/g, "_")}_API_KEY`;
+  return /^[0-9]/.test(derived) ? `PROVIDER_${derived}` : derived;
+}
+
+/**
+ * Merge overlay sources in ascending precedence: each later source wins per provider id and per
+ * Bot entry. The server's database overlay is merged between the file and the environment, so
+ * the standing order is file < database < `CUSTOM_PROVIDERS_JSON`.
+ */
+export function mergeCustomProvidersOverlays(
+  ...overlays: readonly CustomProvidersOverlay[]
 ): CustomProvidersOverlay {
-  const merged: ProviderSpec[] = [];
+  const order: string[] = [];
   const byId = new Map<string, ProviderSpec>();
   let bots: Record<string, { provider: string; model: string }> = {};
-  const absorb = (overlay: CustomProvidersOverlay) => {
+  for (const overlay of overlays) {
     for (const spec of overlay.providers) {
-      if (!byId.has(spec.id)) merged.push(spec);
+      if (!byId.has(spec.id)) order.push(spec.id);
       byId.set(spec.id, spec);
     }
     bots = { ...bots, ...overlay.bots };
+  }
+  return {
+    providers: order.map((id) => byId.get(id)).filter((spec) => spec !== undefined),
+    bots,
   };
+}
 
+/** The overlay in the file source alone. A missing file is an empty overlay. */
+export function readCustomProvidersFileOverlay(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): CustomProvidersOverlay {
   let fileText: string | undefined;
   try {
     // Required lazily: this module is imported in places where node:fs may not exist at all
@@ -316,14 +332,87 @@ function readOverlay(
   } catch {
     fileText = undefined;
   }
-  if (fileText !== undefined) {
-    absorb(parseCustomProvidersOverlay(fileText, customProvidersFilePath(env)));
-  }
+  return fileText === undefined
+    ? { providers: [], bots: {} }
+    : parseCustomProvidersOverlay(fileText, customProvidersFilePath(env));
+}
+
+/** The overlay in `CUSTOM_PROVIDERS_JSON` alone. An unset variable is an empty overlay. */
+export function readCustomProvidersEnvOverlay(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): CustomProvidersOverlay {
   const inline = env.CUSTOM_PROVIDERS_JSON?.trim();
-  if (inline) {
-    absorb(parseCustomProvidersOverlay(inline, "CUSTOM_PROVIDERS_JSON"));
+  return inline
+    ? parseCustomProvidersOverlay(inline, "CUSTOM_PROVIDERS_JSON")
+    : { providers: [], bots: {} };
+}
+
+/**
+ * The overlay this process runs with: file first, `CUSTOM_PROVIDERS_JSON` over it, so an
+ * environment can restate one provider without restating them all. Absent both, an empty overlay
+ * — the registry stays the three built-in rows and nothing about the base file's checks changes.
+ *
+ * A file that exists but does not parse stops startup like a bad base row; a file that does not
+ * exist is simply no overlay, because the file is how a deployment opts in.
+ */
+function readOverlay(
+  env: Readonly<Record<string, string | undefined>>,
+): CustomProvidersOverlay {
+  return mergeCustomProvidersOverlays(
+    readCustomProvidersFileOverlay(env),
+    readCustomProvidersEnvOverlay(env),
+  );
+}
+
+/** One provider spec as the snake-case row every loader and the materialized file use. */
+export function customProviderRowFromSpec(spec: ProviderSpec): {
+  label: string;
+  base_url: string;
+  key_variable: string;
+  base_url_variable: string;
+  default_model: string;
+  api: string;
+} {
+  if (!spec.baseUrl) {
+    throw new Error(`Provider ${spec.id} has no endpoint to write as an overlay row.`);
   }
-  return { providers: merged.map((spec) => byId.get(spec.id) ?? spec), bots };
+  return {
+    label: spec.label,
+    base_url: spec.baseUrl,
+    key_variable: spec.keyVariable,
+    base_url_variable: spec.baseUrlVariable,
+    default_model: spec.defaultModel,
+    api: spec.api ?? "chat",
+  };
+}
+
+/**
+ * Serialize an overlay for the file both loaders already read. It contains provider rows and
+ * Bot selections only — never a key value; a row names the variable or vault entry for its key.
+ */
+export function serializeCustomProvidersOverlay(
+  overlay: CustomProvidersOverlay,
+): string {
+  const providers: Record<string, ReturnType<typeof customProviderRowFromSpec>> = {};
+  for (const spec of overlay.providers) {
+    providers[spec.id] = customProviderRowFromSpec(spec);
+  }
+  return `${JSON.stringify({ providers, bots: overlay.bots }, null, 2)}\n`;
+}
+
+/**
+ * Materialize an already-merged overlay to the overlay file path. The server calls this after
+ * reading its durable database rows, so separate processes (notably the Python loader) see the
+ * same registry without needing a database connection of their own.
+ */
+export function writeCustomProvidersOverlayFile(
+  overlay: CustomProvidersOverlay,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): string {
+  const { writeFileSync } = require("node:fs") as typeof import("node:fs");
+  const path = customProvidersFilePath(env);
+  writeFileSync(path, serializeCustomProvidersOverlay(overlay), "utf-8");
+  return path;
 }
 
 /**
