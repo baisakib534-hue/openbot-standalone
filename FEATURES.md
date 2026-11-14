@@ -140,3 +140,65 @@ classified as **writes**:
   coworker runs on the deployment's model — provider/model are deployment settings
   (`BOT_PROVIDER`/`BOT_MODEL`), not per-agent fields; naming a provider in the ask makes the
   Bot check it is registered first.
+
+## 5. Spaces — document workspaces (ported from OpenDots)
+
+A **Space** is a small document workspace: a library of pages you and your Bots write
+together. Open the **Spaces** entry in the sidebar (next to Skills).
+
+- **Library.** Each Space lists its pages as cards (grid or list), with search across titles
+  and content and sorting by recent edit or name. Pages can nest: a page's subpages show on
+  the page itself, and deleting a page moves its subpages up one level rather than deleting
+  them.
+- **Editor.** Pages edit in a rich visual editor (headings, lists, checklists, quotes, code,
+  tables, links, undo/redo, and a `/` slash menu for blocks) with a Markdown source mode one
+  click away. Markdown is the stored source of truth; the editor's document state is kept
+  alongside it. Edits autosave after a short pause.
+- **Revision conflicts.** Every save carries the revision you started from. If the page
+  changed underneath you — another tab, or a Bot edit — the save is refused with a conflict
+  message and **your draft is kept**; load the latest version when you are ready to merge by
+  hand. Nothing is silently overwritten.
+- **Bot access (grants).** A Bot sees a Space only while it is ticked in the Space's **Bot
+  access** panel. With a grant, the Bot gets five page tools in chat — `list_spaces`,
+  `list_pages`, `read_page`, `create_page`, `update_page` — scoped to exactly the Spaces it
+  was granted, checked again on every call. Revoke the tick and the tools stop seeing the
+  Space immediately. Updates require the current revision, so a Bot can never clobber a
+  newer edit either.
+- **Page conversations.** Open a page and choose **Discuss**: pick a granted Bot and you get
+  a conversation bound to that page. The Bot runs with the page's current content in its
+  context (marked as material to work from, re-readable with `read_page`), so "tighten the
+  second paragraph" just works. In local mode these threads run on the same local runner as
+  every other chat.
+- **Save a conversation as a page.** Inside a page conversation, **Save as page** writes the
+  visible conversation into a new page in the same Space, stamped with where it came from.
+- **Review before save.** When a Bot drafts a whole page in a page conversation, it asks
+  first: a review card shows the proposed title and content, you approve or decline, and
+  only an approval writes the page — exactly once, even if the request is retried. Declining
+  tells the Bot not to save it.
+
+There are no new environment variables for Spaces; everything is per-user data in the same
+database, scoped to your account like Routines and skills.
+
+### OpenDots → OpenBot audit (phase 2)
+
+Every OpenDots feature, and where it landed:
+
+| OpenDots feature | Verdict |
+| --- | --- |
+| Spaces, page library (grid/list, search, sort) | **Ported** — §5 above |
+| Rich page editor (TipTap, slash commands, source mode) | **Ported** — same TipTap 3.x family, OpenBot chrome and theme tokens |
+| Nested subpages, delete re-parents children | **Ported** |
+| Autosave with revision check (409 on stale save) | **Ported** |
+| Per-page conversations (page content as chat context) | **Ported** — page context rides the Bot's normal thread machinery, local mode included |
+| Save conversation as page | **Ported** |
+| Page review-before-save (approve/decline card, idempotent save) | **Ported** |
+| Space access grants per Dot | **Ported** — mapped onto a per-Space Bot access panel and per-call grant checks |
+| Specialist Dots (named helpers with instructions) | Already in OpenBot — coworkers/Bots (§4 creates them from chat) |
+| Scheduled background work | Already in OpenBot — Routines (cron, quiet hours, pause/resume) |
+| Managed channels (e.g. Slack) | Already in OpenBot — channels |
+| Browser/computer work | Already in OpenBot — the computer gateway behind the hosted browser tools |
+| Voice turns and spoken summaries | Already in OpenBot — voice sessions with written summaries |
+| Memory / standing preferences | Already in OpenBot — personal memory and user instructions |
+| Mascot artwork per Dot | Not ported — OpenDots' mascot PNGs are artwork for its own cast; OpenBot Bots already carry their own seeded avatars, and new artwork is a design task, not a code gap |
+| TaskPresentation / ResultPane components | Not ported — presentational patterns tied to OpenDots' own task screens; OpenBot renders routine runs and tool results in its own surfaces |
+| Automatic Learning from demonstrations | Not ported — it depends on hosted Intelligence recordings in OpenDots' design; OpenBot's learning exists in upstream mode only, and stays off in local mode on both sides |

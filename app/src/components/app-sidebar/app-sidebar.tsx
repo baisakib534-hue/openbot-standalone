@@ -2,6 +2,7 @@ import {
   IconBolt,
   IconBox,
   IconLogout,
+  IconNotebook,
   IconPlus,
   IconSearch,
   IconSettings,
@@ -384,6 +385,26 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 <IconBox />
               </div>
               <span className="text-sm trackint-tight">Skills</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            {/* Beside Skills: a Space is a library a person and their Bots write together. */}
+            <SidebarMenuButton
+              className="hover:bg-foreground/5 h-10"
+              render={(props) => (
+                <Link
+                  {...props}
+                  to="/spaces"
+                  activeProps={{
+                    className: "bg-foreground/5",
+                  }}
+                />
+              )}
+            >
+              <div className="size-[28px] flex items-center justify-center">
+                <IconNotebook />
+              </div>
+              <span className="text-sm">Spaces</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>
