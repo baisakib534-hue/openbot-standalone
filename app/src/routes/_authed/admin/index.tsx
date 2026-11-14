@@ -1,4 +1,5 @@
 import {
+  IconApi,
   IconBuildingBank,
   IconChecks,
   IconChevronRight,
@@ -62,6 +63,12 @@ const SECTIONS: {
         description: "Keys and tokens held for this deployment.",
         icon: IconKey,
         linkOptions: { to: "/admin/credentials" },
+      },
+      {
+        title: "Providers",
+        description: "The model providers Bots run on, and the default.",
+        icon: IconApi,
+        linkOptions: { to: "/admin/providers" },
       },
       {
         title: "Boundaries",

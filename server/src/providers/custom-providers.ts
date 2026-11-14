@@ -1,4 +1,4 @@
-import { asc } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import {
   defaultKeyVariableForCustomProvider,
   mergeCustomProvidersOverlays,
@@ -58,6 +58,8 @@ export type CustomProviderInput = {
 export type CustomProviderStore = {
   list(): Promise<CustomProviderRecord[]>;
   upsert(input: CustomProviderInput): Promise<CustomProviderRecord>;
+  /** Delete one row. False when no row by that id exists. */
+  remove(id: string): Promise<boolean>;
 };
 
 /** Validate an input exactly as a loader validates an overlay row, and normalize it to a spec. */
@@ -154,6 +156,14 @@ export function createCustomProviderStore(
       if (!row) throw new Error("Custom provider could not be stored");
       return toRecord(row);
     },
+
+    async remove(id) {
+      const removed = await database
+        .delete(customProviders)
+        .where(eq(customProviders.id, id))
+        .returning({ id: customProviders.id });
+      return removed.length > 0;
+    },
   };
 }
 
@@ -184,6 +194,10 @@ export class InMemoryCustomProviderStore implements CustomProviderStore {
     );
     this.records.set(record.id, record);
     return { ...record };
+  }
+
+  async remove(id: string): Promise<boolean> {
+    return this.records.delete(id);
   }
 
   /** Everything the store holds, as one string — a test's way to prove a secret is absent. */

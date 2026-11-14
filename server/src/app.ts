@@ -50,6 +50,8 @@ import type { ChannelEventHub } from "./channels/events";
 import { createGroupRoutes, type GroupConversations } from "./channels/group";
 import { createSpaceRoutes } from "./spaces/routes";
 import type { SpaceStore } from "./spaces/store";
+import { createProviderRoutes } from "./providers/routes";
+import type { ProvidersService } from "./providers/service";
 import { type ChannelStore, createChannelRoutes } from "./channels/routes";
 import type { ThreadIdentity } from "./channels/thread-identity";
 import { createThreadRoutes } from "./channels/thread-routes";
@@ -400,6 +402,12 @@ export function createApp(
      * exists.
      */
     spaces?: { store: SpaceStore; threadIdentity: ThreadIdentity };
+    /**
+     * Providers: the merged registry, the durable overlay and the deployment default, behind
+     * the admin Providers page and its routes. The service is the same implementation the
+     * Platform Tools call. Absent, no Providers surface exists.
+     */
+    providers?: { service: ProvidersService };
     approvals?: ApprovalService;
     /**
      * Shared apps: who may use an app's one team account, and the switch that makes an app Shared.
@@ -1545,6 +1553,11 @@ export function createApp(
       createSpaceRoutes(coworker.spaces.store, requireUser, {
         threadIdentity: coworker.spaces.threadIdentity,
       }),
+    );
+  if (coworker?.providers)
+    app.route(
+      "/api/providers",
+      createProviderRoutes(coworker.providers.service, requireUser),
     );
   if (coworker?.teamBots)
     app.route(

@@ -316,11 +316,12 @@ describe("Platform Tools", () => {
     expect(entry?.transport).toBe("builtin-platform");
   });
 
-  test("pins the exact write list: every one of the four tools is a write", () => {
+  test("pins the exact write list: every one of the five tools is a write", () => {
     expect(entry?.writeTools).toEqual([
       "add_mcp_server",
       "install_skill",
       "add_custom_provider",
+      "set_default_provider",
       "add_agent",
     ]);
     for (const name of entry?.writeTools ?? []) {

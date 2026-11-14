@@ -10,7 +10,7 @@ import { MAX_RESULT_CHARS, type McpCallResult, type McpTool } from "./mcp";
  * the very methods the administrator's screens call (`PluginStore.addCustomServer`,
  * `PluginStore.installSkill`, the agent profile store's `create`, and the providers overlay the
  * model-provider loaders read). Nothing here is a side door: this module is reached only through
- * `PluginStore.callTool`, which checks the Bot's grant, classifies the call (all four tools are in
+ * `PluginStore.callTool`, which checks the Bot's grant, classifies the call (all five tools are in
  * the catalogue entry's `writeTools`, so each is a WRITE), runs the policy engine and the approval
  * gate, and writes the audit row before the call is made.
  *
@@ -34,6 +34,8 @@ export type CustomProviderOutcome = {
   credentialStored: boolean;
   /** Where the merged overlay was materialized for the other loaders, when that write landed. */
   materializedPath?: string;
+  /** The deployment default this call also set, when `use_as_default` was asked for. */
+  defaultSet?: { provider: string; model: string };
 };
 
 export type PlatformTools = {
@@ -93,8 +95,21 @@ export type PlatformTools = {
       keyVariable?: string;
       defaultModel: string;
       apiKey?: string;
+      /** Also set this provider as the deployment default (with `model`, or its default). */
+      useAsDefault?: boolean;
+      model?: string;
     },
   ): Promise<CustomProviderOutcome>;
+  /**
+   * Set the deployment default provider — the one stored choice every built-in Bot runs on,
+   * PicoClaw-style. Persisted in Postgres (the deployment-default store), so it outranks
+   * BOT_PROVIDER/BOT_MODEL and survives restarts; it applies from the next server start, like
+   * every provider selection. `model` omitted means the provider's own default model.
+   */
+  setDefaultProvider(
+    actorId: string,
+    input: { provider: string; model?: string },
+  ): Promise<{ provider: string; model: string }>;
   /** Whether a provider id is registered — a built-in, or an overlay row the loaders accepted. */
   providerExists(id: string): boolean;
   /**
@@ -247,8 +262,44 @@ const TOOLS: readonly McpTool[] = Object.freeze([
           type: "string",
           description: "The model Bots get when none is named, e.g. auto:default.",
         },
+        use_as_default: {
+          type: "boolean",
+          description:
+            "True also makes this provider the deployment default — the one provider every built-in Bot runs on — in the same act, so 'add this provider with this key and use it' is a single ask. The default is stored in Postgres and outranks BOT_PROVIDER/BOT_MODEL from the next server start.",
+        },
+        model: {
+          type: "string",
+          description: "The model to select when use_as_default is true. Defaults to default_model.",
+        },
       },
       required: ["id", "label", "base_url", "default_model"],
+    },
+  },
+  {
+    name: "set_default_provider",
+    description: [
+      "Set the deployment's default model provider: the single provider + model every built-in",
+      "Bot runs on, the way PicoClaw's one provider entry works. The choice is stored in the",
+      "deployment's Postgres database, outranks BOT_PROVIDER/BOT_MODEL in the environment, and",
+      "survives restarts and redeploys — so a default can be switched from inside the app even",
+      "on a host whose environment already pins a provider. The provider must already be",
+      "registered (built-in, environment, overlay file, or added with add_custom_provider);",
+      "an unknown id is refused and nothing changes. `model` omitted means the provider's own",
+      "default model. Like every provider selection it applies from the next server start.",
+    ].join("\n"),
+    inputSchema: {
+      type: "object",
+      properties: {
+        provider: {
+          type: "string",
+          description: "The registered provider id to make the default, e.g. 9router.",
+        },
+        model: {
+          type: "string",
+          description: "Optional: the model Bots run on. Defaults to the provider's default model.",
+        },
+      },
+      required: ["provider"],
     },
   },
   {
@@ -529,15 +580,37 @@ export async function callTool(
         ...(keyVariable ? { keyVariable } : {}),
         ...(apiKey ? { apiKey } : {}),
         defaultModel,
+        ...(args.use_as_default === true ? { useAsDefault: true } : {}),
+        ...(stringArg(args, "model") ? { model: stringArg(args, "model") } : {}),
       });
       const materialized = outcome.materializedPath
         ? ` The merged overlay was also written to ${outcome.materializedPath}, so the Python and separate-process loaders see it too.`
         : " The overlay file could not be written, so separate-process loaders will pick it up once that path is writable; the server registry and the database copy are in place.";
       const keyNote = outcome.credentialStored
-        ? `Its API key is stored encrypted in the credential vault (never in the provider row or the overlay file); key resolution reads ${outcome.keyVariable} from the environment first, then the stored key.`
+        ? `Its API key is stored encrypted in the credential vault (never in the provider row or the overlay file); key resolution reads the stored package credential first when one exists, then ${outcome.keyVariable} from the environment, then the stored key.`
         : `Its key is read from ${outcome.keyVariable} — make sure that variable is set in the deployment's environment.`;
+      const defaultNote = outcome.defaultSet
+        ? ` It is also the deployment default now (provider "${outcome.defaultSet.provider}", model "${outcome.defaultSet.model}"), stored in Postgres — from the next server start every built-in Bot runs on it, ahead of BOT_PROVIDER/BOT_MODEL.`
+        : ` It is active from the next server start once the deployment points at it: set BOT_PROVIDER=${outcome.id}, or make it the default with set_default_provider (the running server does not switch its selected model mid-run).`;
       return asResult(
-        `${label} is registered as provider "${outcome.id}", stored durably in the Postgres custom_providers table — it survives restarts and redeploys with no dashboard or environment edits.${materialized} ${keyNote} It is active from the next server start: point the deployment at it with BOT_PROVIDER=${outcome.id} (the running server does not switch its selected model mid-run).`,
+        `${label} is registered as provider "${outcome.id}", stored durably in the Postgres custom_providers table — it survives restarts and redeploys with no dashboard or environment edits.${materialized} ${keyNote}${defaultNote}`,
+      );
+    }
+
+    if (toolName === "set_default_provider") {
+      const provider = stringArg(args, "provider");
+      if (!provider) return failure("A provider id is required.");
+      if (!tools.providerExists(provider.toLowerCase())) {
+        return failure(
+          `There is no provider registered as "${provider}". Register it first with add_custom_provider, then set it as the default.`,
+        );
+      }
+      const outcome = await tools.setDefaultProvider(actorId, {
+        provider: provider.toLowerCase(),
+        ...(stringArg(args, "model") ? { model: stringArg(args, "model") } : {}),
+      });
+      return asResult(
+        `"${outcome.provider}" (model "${outcome.model}") is now the deployment default, stored in Postgres. From the next server start every built-in Bot runs on it — the stored default outranks BOT_PROVIDER/BOT_MODEL, so this holds even where the environment already pins a provider.`,
       );
     }
 

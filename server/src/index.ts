@@ -157,9 +157,13 @@ import {
 import {
   createCustomProviderStore,
   CustomProviderRegistry,
-  registerChatCustomProvider,
   syncCustomProvidersOverlay,
 } from "./providers/custom-providers";
+import {
+  createDeploymentDefaultStore,
+  environmentWithDeploymentDefault,
+} from "./providers/deployment-default";
+import { createProvidersService } from "./providers/service";
 import { createDatabase } from "./db/client";
 import {
   channelAgents,
@@ -374,6 +378,12 @@ const customProviderStore = createCustomProviderStore(database);
 const customProviderRegistry = new CustomProviderRegistry(
   (await syncCustomProvidersOverlay({ store: customProviderStore })).overlay,
 );
+/*
+ * The in-app deployment default (Providers page / set_default_provider): one provider + model
+ * stored in Postgres, read at start and applied OVER the environment when the runtime model
+ * is built below — see providers/deployment-default.ts for the precedence chain.
+ */
+const deploymentDefaultStore = createDeploymentDefaultStore(database);
 const identityStore = createIdentityStore(database, credentialStore);
 const agentVault = {
   store: credentialStore,
@@ -876,6 +886,18 @@ const platformActorEmail = async (actorId: string): Promise<string> => {
     .limit(1);
   return row?.email ?? actorId;
 };
+/*
+ * The Providers service: the one implementation behind the Providers page routes and the
+ * Platform Tools' provider acts, so the two doors cannot disagree. Built here because it
+ * needs the credential admin service the tool handlers also use.
+ */
+const providersService = createProvidersService({
+  store: customProviderStore,
+  registry: customProviderRegistry,
+  credentialAdmin: platformCredentialAdmin,
+  credentialReader: credentialStore,
+  deploymentDefaultStore,
+});
 usePlatformTools({
   actorIsAdmin: async (actorId) =>
     (await actorFor(actorId)).role === "admin",
@@ -921,28 +943,29 @@ usePlatformTools({
     return { slug: input.slug };
   },
   addCustomProvider: async (actorId, input) => {
-    const outcome = await registerChatCustomProvider(
-      {
-        store: customProviderStore,
-        credentialAdmin: platformCredentialAdmin,
-      },
-      {
-        actorId,
-        actorLabel: await platformActorEmail(actorId),
-        id: input.id,
-        label: input.label,
-        baseUrl: input.baseUrl,
-        ...(input.keyVariable ? { keyVariable: input.keyVariable } : {}),
-        ...(input.apiKey ? { apiKey: input.apiKey } : {}),
-        defaultModel: input.defaultModel,
-      },
-    );
-    // The registry learns the provider at once (so add_agent can name it in this same run);
-    // the runtime model built at boot is deliberately not rebuilt — see the tool's own result.
-    customProviderRegistry.replace(outcome.overlay);
-    const { overlay: _overlay, ...result } = outcome;
-    return result;
+    // The Providers service is the one implementation (the Providers page routes call the
+    // same method): durable row, encrypted key, live registry refresh, and — when asked —
+    // the deployment default, in one act. The runtime model built at boot is deliberately
+    // not rebuilt — see the tool's own result.
+    return providersService.add({
+      actorId,
+      actorLabel: await platformActorEmail(actorId),
+      id: input.id,
+      label: input.label,
+      baseUrl: input.baseUrl,
+      ...(input.keyVariable ? { keyVariable: input.keyVariable } : {}),
+      ...(input.apiKey ? { apiKey: input.apiKey } : {}),
+      defaultModel: input.defaultModel,
+      ...(input.useAsDefault ? { useAsDefault: true } : {}),
+      ...(input.model ? { model: input.model } : {}),
+    });
   },
+  setDefaultProvider: async (actorId, input) =>
+    providersService.setDefault({
+      provider: input.provider,
+      ...(input.model ? { model: input.model } : {}),
+      actorLabel: await platformActorEmail(actorId),
+    }),
   providerExists: (id) => customProviderRegistry.exists(id),
   addAgent: async (actorId, input) => {
     // Resolve the grants before anything is written: a name that matches no added server refuses
@@ -1189,9 +1212,20 @@ const stallGuard = createStallGuard({
 });
 
 normalizeModelBaseUrls();
+/*
+ * The in-app deployment default, when one is stored, rewrites BOT_PROVIDER/BOT_MODEL in the
+ * environment the model is built from — the stored choice outranks the environment, so a
+ * default set on the Providers page takes effect even on a host whose environment pins a
+ * provider. Everything below that resolves a model key reads the same effective environment.
+ */
+const deploymentDefault = await deploymentDefaultStore.get();
+const modelEnvironment = environmentWithDeploymentDefault(
+  process.env,
+  deploymentDefault,
+);
 const runtimeModel = runtimeModelForEnvironment(
   tenantPackage.model,
-  process.env,
+  modelEnvironment,
   (provider) => customProviderRegistry.lookup(provider),
 );
 /*
@@ -1216,7 +1250,7 @@ const intentRouter = createIntentRouter({
         keyVariable: runtimeModel.customProvider?.keyVariable,
         customProviderId: runtimeModel.customProvider?.id,
         keyId: tenantPackage.model.credentialSecretRef,
-        environment: process.env,
+        environment: modelEnvironment,
       }),
   }),
 });
@@ -1237,7 +1271,7 @@ const chooseSkills = createModelCompleter({
       keyVariable: runtimeModel.customProvider?.keyVariable,
       customProviderId: runtimeModel.customProvider?.id,
       keyId: tenantPackage.model.credentialSecretRef,
-      environment: process.env,
+      environment: modelEnvironment,
     }),
 });
 
@@ -1252,7 +1286,7 @@ const resolveRuntimeModelApiKey = () =>
     keyVariable: runtimeModel.customProvider?.keyVariable,
     customProviderId: runtimeModel.customProvider?.id,
     keyId: tenantPackage.model.credentialSecretRef,
-    environment: process.env,
+    environment: modelEnvironment,
   });
 
 const hostAccessBroker = createHostAccessBroker(Date.now, {
@@ -3310,6 +3344,7 @@ const app = createApp(
     },
     groups: groupConversations,
     spaces: { store: spaceStore, threadIdentity },
+    providers: { service: providersService },
     teamBots,
     lifecycle: {
       lifecycle: createBotLifecycleStore(database),

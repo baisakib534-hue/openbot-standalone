@@ -6,19 +6,75 @@ environment, or **by asking the Bot in chat**, once the Bot holds the Platform T
 same checks, and leave the same audit trail. This works in local mode
 (`OPENBOT_LOCAL_MODE=true`) exactly as it does upstream.
 
-## 1. Add a custom model provider
+## 1. Providers and the default — the PicoClaw shape
 
-A custom provider is any OpenAI-compatible endpoint (a router like 9router, a gateway, a local
-server) registered **as data** — no code edit, no rebuild of the loaders. Both provider loaders
-(the TypeScript one and the Python one) read the same overlay, so a provider registered once is
-visible to every Bot.
+One entry is the whole story: **a provider (base URL + API key + default model), and one
+deployment default the Bots simply run on.** No per-Bot credential concept stands in the way:
+a tenant package *may* carry its own stored credential, and when one actually exists it is
+spent first (see the chain below) — but nothing requires one, and a deployment that never
+adds one runs entirely on its default provider.
 
-The overlay has three sources, in this precedence order: **`CUSTOM_PROVIDERS_JSON` (environment)
-> the Postgres `custom_providers` table > the overlay file**. A dashboard-set environment row
-always wins, a provider added from chat (the table) beats the file, and a built-in provider id
-can never be redefined by any source. On every boot the server merges the three sources and
-writes the result back to the overlay file, so the loaders in other processes — which cannot
-read the server's database — see the database rows too.
+### Way A — the Providers page (Admin → Providers)
+
+The page lists every provider the deployment knows — built-ins, environment and file rows,
+and app-added rows — each with its source badge, whether a key is set, and a **Default**
+badge on the active one.
+
+- **Add provider**: name, ID (suggested from the name), base URL, API key (a password field;
+  or name the environment variable it arrives in instead), default model, and an optional
+  **Use as default** checkbox. The row is stored in Postgres and its key encrypted in the
+  credential vault; the row appears in the list at once.
+- **Set as default** on any row (with an optional model override) makes it the one provider
+  every built-in Bot runs on.
+- **Delete** works on app-added rows; deleting the current default clears the default.
+  Built-in, environment and file rows cannot be deleted here — the page says where they
+  come from instead.
+- Keys are **write-only**: no screen or endpoint ever shows one. Replacing a key = editing
+  the provider with a new key (post it again).
+
+### Way B — ask the Bot (the same acts, in chat)
+
+With Platform Tools granted (§4), one ask does the whole PicoClaw flow:
+
+*"Add 9router as a provider: base URL https://ninerouter-vzw3.onrender.com/v1, default model
+hermes, here is the API key: … — and use it as the default."*
+
+The Bot calls `add_custom_provider` with `use_as_default: true`: the row lands in the
+**Postgres `custom_providers` table** (survives restarts and redeploys, zero dashboard or
+environment edits), the key is stored **encrypted in the credential vault** under coordinates
+derived from the provider id (the plaintext never lands in the row, the overlay file, a log,
+or the tool result), and the provider becomes the deployment default in the same act.
+`set_default_provider` on its own switches the default to any already-registered provider.
+
+### Which provider wins — the one chain
+
+For a built-in Bot's provider + model, in order:
+
+1. **The in-app deployment default** (Providers page / `set_default_provider`), stored in
+   Postgres — provider + model. It outranks the environment on purpose: on a host whose
+   environment already pins `BOT_PROVIDER`, an in-app switch must still be able to win.
+2. **`BOT_PROVIDER` / `BOT_MODEL`** in the environment.
+3. **The tenant package's own provider/model** (the upstream default).
+
+For the KEY, the chain depends on which provider was selected. On the package's own provider
+(no custom selection), a stored tenant-package credential — when an administrator actually
+added one — wins over the provider's environment key (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`).
+Under a selected custom provider, the key is the environment variable the row names first,
+then the key stored in the vault when the provider was registered; the package credential is
+never spent at a third-party endpoint it was not stored for. There is no fallback-model
+chain in this codebase — a deployment has one default provider at a time, and this guide does
+not invent a second one.
+
+### Way C — environment or file (the deployment-operator route)
+
+A custom provider is any OpenAI-compatible endpoint registered **as data** — no code edit.
+Both provider loaders (TypeScript and Python) read the same overlay, whose sources merge in
+this order: **`CUSTOM_PROVIDERS_JSON` (environment) > the Postgres `custom_providers` table
+> the overlay file**; a built-in id can never be redefined. On every boot the server writes
+the merged result back to the overlay file, so loaders in other processes see database rows
+too. The JSON takes either shape — the wrapped one from the examples
+(`{"providers": {"9router": {…}}, "bots": {}}`) or a flat map of provider id to row
+(`{"9router": {…}}`), which is the shape a hosting dashboard's variable naturally holds.
 
 Each provider row has:
 
@@ -31,10 +87,6 @@ Each provider row has:
 | `api` | Always `"chat"` (OpenAI-compatible chat completions) | `chat` |
 | `base_url_variable` | Optional: env var that may override `base_url`. Derived from the id when omitted | `PROVIDER_9ROUTER_BASE_URL` |
 
-### Way A — environment variable
-
-Set `CUSTOM_PROVIDERS_JSON` to the overlay as JSON, and the key itself as its own variable:
-
 ```bash
 CUSTOM_PROVIDERS_JSON={"providers":{"9router":{"label":"9router","base_url":"https://ninerouter-vzw3.onrender.com/v1","key_variable":"NINEROUTER_API_KEY","default_model":"auto:default","api":"chat"}},"bots":{}}
 NINEROUTER_API_KEY=<your key, as a secret>
@@ -42,41 +94,15 @@ BOT_PROVIDER=9router        # select it for the built-in Bots
 # BOT_MODEL=combo:top       # optional: override its default model
 ```
 
-### Way B — a file
-
-Copy `shared/providers.local.example.json` to `providers.local.json` (same folder) and edit —
-it ships with 9router and FreeLLMAPI worked examples. To keep the file somewhere durable (a
-mounted volume), point `CUSTOM_PROVIDERS_PATH` at it. When both sources name the same id, the
-environment JSON wins. An optional `"bots"` section in the overlay can point a named Bot at a
+Or copy `shared/providers.local.example.json` to `providers.local.json` (same folder) and
+edit — it ships with 9router and FreeLLMAPI worked examples; point `CUSTOM_PROVIDERS_PATH`
+at it to keep it somewhere durable. An optional `"bots"` section can point a named Bot at a
 custom provider, e.g. `"bots": {"agent-langgraph": {"provider": "9router", "model": "auto:default"}}`.
 
-### Way C — ask the Bot (durable, self-contained)
-
-With Platform Tools granted (§4): *"Add 9router as a provider: base URL
-https://ninerouter-vzw3.onrender.com/v1, default model auto:default, here is the API key: …"*
-The Bot calls `add_custom_provider`, which stores the row in the **Postgres `custom_providers`
-table** — not in a file on the server's disk — so the provider **survives restarts and
-redeploys**, including on hosts with an ephemeral filesystem (e.g. Render's free tier), with
-**zero dashboard or environment edits**. On the next boot the server merges the table into the
-overlay and materializes it for both loaders automatically.
-
-The key has two ways in:
-
-- **Give the key itself** (`api_key` in the ask). It is stored **encrypted in the credential
-  vault** — the same KEY_ENCRYPTION_KEY-backed store as every other credential — under
-  coordinates derived from the provider id (kind `model`, provider `custom-provider`, keyId =
-  the provider id). The plaintext never lands in the provider row, the overlay file, a log, or
-  the tool result. `key_variable` may be omitted in this form; a fallback variable name is
-  derived from the id (e.g. `PROVIDER_9ROUTER_API_KEY`). At call time, resolution reads the
-  environment variable first when it holds a value, and the stored key otherwise.
-- **Or name the variable** (`key_variable`, no key in chat) — the original behaviour, unchanged:
-  the key is read from that environment variable only.
-
-One honest limit: the provider is registered in the running server's registry immediately,
-but the deployment's selected model is built at startup and is not switched mid-run — so the
-provider becomes selectable (`BOT_PROVIDER=9router`) from the **next server start**. On hosts
-that spin down when idle, that is simply the next natural wake; no redeploy is needed.
-
+One honest limit, true of every way above: a provider is registered in the running server's
+registry immediately, but the deployment's selected model is built at startup and is not
+switched mid-run — so a new provider or default applies from the **next server start**. On
+hosts that spin down when idle, that is simply the next natural wake; no redeploy is needed.
 ## 2. Add an MCP server
 
 ### Admin path
@@ -121,14 +147,15 @@ see §4).
 
 ## 4. Platform Tools: asking the Bot to do it
 
-**Platform Tools** is a built-in server in the catalogue (like Routines) with four tools, all
+**Platform Tools** is a built-in server in the catalogue (like Routines) with five tools, all
 classified as **writes**:
 
 | Tool | What it does | Same store path as |
 |---|---|---|
 | `add_mcp_server` | Register a custom MCP server | Plugins page → Add by URL |
 | `install_skill` | Create a personal or deployment skill | Plugins page → skill form |
-| `add_custom_provider` | Store a provider durably in Postgres; with a key, store it encrypted in the vault | The overlay sources in §1 (database row) |
+| `add_custom_provider` | Store a provider durably in Postgres; with a key, store it encrypted in the vault; `use_as_default` also makes it the deployment default | Providers page → Add provider |
+| `set_default_provider` | Set the deployment default provider (+ optional model), stored in Postgres | Providers page → Set as default |
 | `add_agent` | Create a coworker, optionally with tool grants | Team page → Add coworker (no endpoint) |
 
 ### Grant it to your Bot (once, administrator)
@@ -155,6 +182,9 @@ classified as **writes**:
 
 - *"Add 9router as a provider — base URL https://ninerouter-vzw3.onrender.com/v1, key variable
   NINEROUTER_API_KEY, default model auto:default."*
+- *"Add 9router with this key: … and use it as the default"* → one approval → provider stored,
+  key encrypted, default set; Bots run on it from the next server start.
+- *"Make FreeLLMAPI the default provider, model auto:default."*
 - *"Add this MCP server: name `weather`, URL https://weather.example/mcp, token in
   WEATHER_TOKEN."*
 - *"Install this skill …"* (paste SKILL.md markdown), or *"Install the skill at <URL> for the
@@ -164,8 +194,8 @@ classified as **writes**:
   a server in the ask grants the new Bot every tool that server currently lists (grants are
   per tool underneath). A
   coworker runs on the deployment's model — provider/model are deployment settings
-  (`BOT_PROVIDER`/`BOT_MODEL`), not per-agent fields; naming a provider in the ask makes the
-  Bot check it is registered first.
+  (the in-app default, or `BOT_PROVIDER`/`BOT_MODEL`), not per-agent fields; naming a provider
+  in the ask makes the Bot check it is registered first.
 
 ## 5. Spaces — document workspaces (ported from OpenDots)
 

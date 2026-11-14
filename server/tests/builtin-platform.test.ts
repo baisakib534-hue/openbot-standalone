@@ -43,7 +43,19 @@ function stub(overrides: Partial<PlatformTools> = {}): {
         keyVariable: input.keyVariable ?? "DERIVED_API_KEY",
         credentialStored: input.apiKey !== undefined,
         materializedPath: "/deploy/providers.local.json",
+        ...(input.useAsDefault
+          ? {
+              defaultSet: {
+                provider: input.id,
+                model: input.model ?? input.defaultModel,
+              },
+            }
+          : {}),
       };
+    },
+    setDefaultProvider: async (_actorId, input) => {
+      calls.push({ method: "setDefaultProvider", input });
+      return { provider: input.provider, model: input.model ?? "auto" };
     },
     providerExists: (id) => id === "9router" || id === "openai",
     addAgent: async (_actorId, input) => {
@@ -58,12 +70,13 @@ function stub(overrides: Partial<PlatformTools> = {}): {
 afterEach(() => usePlatformTools(null));
 
 describe("listing", () => {
-  test("advertises exactly the four tools, all named in the catalogue write list", async () => {
+  test("advertises exactly the five tools, all named in the catalogue write list", async () => {
     const names = (await listTools()).map((tool) => tool.name);
     expect(names).toEqual([
       "add_mcp_server",
       "install_skill",
       "add_custom_provider",
+      "set_default_provider",
       "add_agent",
     ]);
   });
@@ -286,6 +299,66 @@ describe("add_custom_provider", () => {
     });
     expect(result.isError).toBe(true);
     expect(result.text).toContain("either api_key itself or the key_variable");
+    expect(calls).toEqual([]);
+  });
+
+  test("use_as_default is one act: the flag and model reach the store and the result says so", async () => {
+    const { tools, calls } = stub();
+    usePlatformTools(tools);
+    const result = await callTool(CONNECTION, "add_custom_provider", {
+      id: "acme",
+      label: "Acme",
+      base_url: "https://acme.example/v1",
+      api_key: "acme-secret-value",
+      default_model: "acme-1",
+      use_as_default: true,
+      model: "acme-2",
+    });
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain("deployment default");
+    expect(result.text).toContain('"acme-2"');
+    expect(result.text).not.toContain("acme-secret-value");
+    expect(calls).toEqual([
+      {
+        method: "addCustomProvider",
+        input: {
+          id: "acme",
+          label: "Acme",
+          baseUrl: "https://acme.example/v1",
+          apiKey: "acme-secret-value",
+          defaultModel: "acme-1",
+          useAsDefault: true,
+          model: "acme-2",
+        },
+      },
+    ]);
+  });
+});
+
+describe("set_default_provider", () => {
+  test("dispatches provider and model and reports the stored default", async () => {
+    const { tools, calls } = stub();
+    usePlatformTools(tools);
+    const result = await callTool(CONNECTION, "set_default_provider", {
+      provider: "9router",
+      model: "hermes",
+    });
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain("deployment default");
+    expect(result.text).toContain("outranks BOT_PROVIDER/BOT_MODEL");
+    expect(calls).toEqual([
+      { method: "setDefaultProvider", input: { provider: "9router", model: "hermes" } },
+    ]);
+  });
+
+  test("an unknown provider id is refused and changes nothing", async () => {
+    const { tools, calls } = stub();
+    usePlatformTools(tools);
+    const result = await callTool(CONNECTION, "set_default_provider", {
+      provider: "no-such-provider",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain('no provider registered as "no-such-provider"');
     expect(calls).toEqual([]);
   });
 });

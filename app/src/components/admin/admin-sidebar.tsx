@@ -1,4 +1,5 @@
 import {
+  IconApi,
   IconArrowLeft,
   IconBuildingBank,
   IconChecks,
@@ -51,6 +52,11 @@ const GROUPS: {
         title: "Credentials",
         icon: IconKey,
         linkOptions: { to: "/admin/credentials" },
+      },
+      {
+        title: "Providers",
+        icon: IconApi,
+        linkOptions: { to: "/admin/providers" },
       },
       {
         title: "Boundaries",
