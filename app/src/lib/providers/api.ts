@@ -18,13 +18,19 @@ export type ProviderRow = {
   source: ProviderSource;
   keyPresent: boolean;
   isDefault: boolean;
+  /** Where the effective default came from when this row is it; null otherwise. */
+  defaultOrigin: "db" | "env" | null;
 };
 
 export type DeploymentDefault = { provider: string; model: string };
 
+/** The default the deployment runs on, and which layer supplied it. */
+export type EffectiveDefault = DeploymentDefault & { origin: "db" | "env" };
+
 export type ProvidersResponse = {
   providers: ProviderRow[];
   deploymentDefault: DeploymentDefault | null;
+  effectiveDefault: EffectiveDefault | null;
 };
 
 export const providerKeys = {

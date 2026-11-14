@@ -32,11 +32,12 @@ export function createProviderRoutes(
   routes.get("/", requireUser, async (context) => {
     const denied = requireAdmin(context);
     if (denied) return denied;
-    const [providers, deploymentDefault] = await Promise.all([
+    const [providers, deploymentDefault, effectiveDefault] = await Promise.all([
       service.list(),
       service.deploymentDefault(),
+      service.effectiveDefault(),
     ]);
-    return context.json({ providers, deploymentDefault });
+    return context.json({ providers, deploymentDefault, effectiveDefault });
   });
 
   routes.post("/", requireUser, async (context) => {

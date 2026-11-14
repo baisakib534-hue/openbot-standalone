@@ -1,8 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { Hono, type MiddlewareHandler } from "hono";
+import { writeFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   mergeCustomProvidersOverlays,
   readCustomProvidersEnvOverlay,
+  readCustomProvidersFileOverlay,
 } from "../../shared/model-providers";
 import type { AppVariables } from "../src/auth/guards";
 import { builtInAgentConfiguration, runtimeModelForEnvironment } from "../src/copilot";
@@ -16,6 +22,7 @@ import {
 } from "../src/credentials";
 import {
   CustomProviderRegistry,
+  customProvidersOverlayFromRecords,
   InMemoryCustomProviderStore,
 } from "../src/providers/custom-providers";
 import {
@@ -357,4 +364,291 @@ describe("the Providers routes", () => {
       "cannot be deleted here",
     );
   });
+});
+
+describe("one row per provider, badged by the source whose row wins", () => {
+  test("a file-only provider is badged file and listed once", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "openbot-providers-file-"));
+    const overlayPath = join(dir, "providers.local.json");
+    writeFileSync(
+      overlayPath,
+      JSON.stringify({
+        providers: {
+          filerouter: {
+            label: "File Router",
+            base_url: "https://file.example/v1",
+            key_variable: "FILEROUTER_API_KEY",
+            default_model: "file-1",
+            api: "chat",
+          },
+        },
+      }),
+    );
+    const env = { CUSTOM_PROVIDERS_PATH: overlayPath };
+    const store = new InMemoryCustomProviderStore();
+    const registry = new CustomProviderRegistry(
+      mergeCustomProvidersOverlays(
+        readCustomProvidersFileOverlay(env),
+        readCustomProvidersEnvOverlay(env),
+      ),
+    );
+    const vault = memoryVault();
+    const service = createProvidersService({
+      store,
+      registry,
+      credentialAdmin: vault.credentialAdmin,
+      credentialReader: vault.reader,
+      deploymentDefaultStore: new InMemoryDeploymentDefaultStore(),
+      env,
+    });
+    const rows = await service.list();
+    const fileRows = rows.filter((row) => row.id === "filerouter");
+    expect(fileRows).toHaveLength(1);
+    expect(fileRows[0]).toMatchObject({ source: "file", keyPresent: false });
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("a provider in the database and the materialized file lists once, badged db", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "openbot-providers-restart-"));
+    const overlayPath = join(dir, "providers.local.json");
+    const env = { CUSTOM_PROVIDERS_PATH: overlayPath };
+    const first = buildService(env);
+    await first.service.add({
+      actorId: "admin-1",
+      actorLabel: "admin@example.test",
+      id: "acme",
+      label: "Acme",
+      baseUrl: "https://acme.example/v1",
+      defaultModel: "acme-1",
+      apiKey: "acme-secret",
+    });
+    // The add materialized the merged overlay: the file now names acme too.
+    expect(readCustomProvidersFileOverlay(env).providers.map((spec) => spec.id)).toContain(
+      "acme",
+    );
+    // A restart rebuilds the registry the way index.ts does — file < database < env,
+    // over the same durable store — and the list must still show acme exactly once,
+    // badged by its origin (the database), not by the file that cached it.
+    const registry = new CustomProviderRegistry(
+      mergeCustomProvidersOverlays(
+        readCustomProvidersFileOverlay(env),
+        customProvidersOverlayFromRecords(await first.store.list()),
+        readCustomProvidersEnvOverlay(env),
+      ),
+    );
+    const restarted = createProvidersService({
+      store: first.store,
+      registry,
+      credentialAdmin: first.vault.credentialAdmin,
+      credentialReader: first.vault.reader,
+      deploymentDefaultStore: first.deploymentDefaultStore,
+      env,
+    });
+    const rows = await restarted.list();
+    const acmeRows = rows.filter((row) => row.id === "acme");
+    expect(acmeRows).toHaveLength(1);
+    expect(acmeRows[0]).toMatchObject({ source: "db", keyPresent: true });
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("the effective default: what the deployment actually runs on", () => {
+  test("an environment pin is the effective default, with BOT_MODEL as its model", async () => {
+    const { service } = buildService({
+      ...ENV_WITH_ROUTER,
+      BOT_PROVIDER: "envrouter",
+      BOT_MODEL: "env-9",
+    });
+    expect(await service.effectiveDefault()).toEqual({
+      provider: "envrouter",
+      model: "env-9",
+      origin: "env",
+    });
+    const rows = await service.list();
+    expect(rows.find((row) => row.id === "envrouter")).toMatchObject({
+      isDefault: true,
+      defaultOrigin: "env",
+    });
+    expect(rows.find((row) => row.id === "openai")).toMatchObject({
+      isDefault: false,
+      defaultOrigin: null,
+    });
+    // The stored in-app default stays empty: the pin is reported, not rewritten.
+    expect(await service.deploymentDefault()).toBeNull();
+  });
+
+  test("an environment pin without BOT_MODEL uses the provider row's default model", async () => {
+    const { service } = buildService({
+      ...ENV_WITH_ROUTER,
+      BOT_PROVIDER: "envrouter",
+    });
+    expect(await service.effectiveDefault()).toEqual({
+      provider: "envrouter",
+      model: "env-1",
+      origin: "env",
+    });
+  });
+
+  test("the in-app default outranks the environment pin", async () => {
+    const { service } = buildService({
+      ...ENV_WITH_ROUTER,
+      BOT_PROVIDER: "openai",
+      BOT_MODEL: "gpt-pinned",
+    });
+    await service.setDefault({ provider: "envrouter", actorLabel: "admin" });
+    expect(await service.effectiveDefault()).toEqual({
+      provider: "envrouter",
+      model: "env-1",
+      origin: "db",
+    });
+    const rows = await service.list();
+    expect(rows.find((row) => row.id === "envrouter")).toMatchObject({
+      isDefault: true,
+      defaultOrigin: "db",
+    });
+    expect(rows.find((row) => row.id === "openai")?.isDefault).toBe(false);
+  });
+
+  test("no pin and no in-app default: no effective default, nothing marked", async () => {
+    const { service } = buildService(ENV_WITH_ROUTER);
+    expect(await service.effectiveDefault()).toBeNull();
+    const rows = await service.list();
+    expect(rows.every((row) => !row.isDefault && row.defaultOrigin === null)).toBe(
+      true,
+    );
+  });
+
+  test("the routes report the effective default alongside the stored one", async () => {
+    const { service } = buildService({
+      ...ENV_WITH_ROUTER,
+      BOT_PROVIDER: "envrouter",
+      BOT_MODEL: "env-9",
+    });
+    const app = buildApp(service);
+    const listed = await app.request("/api/providers");
+    const body = (await listed.json()) as {
+      deploymentDefault: unknown;
+      effectiveDefault: unknown;
+    };
+    expect(body.deploymentDefault).toBeNull();
+    expect(body.effectiveDefault).toEqual({
+      provider: "envrouter",
+      model: "env-9",
+      origin: "env",
+    });
+  });
+});
+
+/**
+ * The live page's exact failure shape, in a fresh process: the suite's own process
+ * carries no CUSTOM_PROVIDERS_JSON, so the shared module never folded an overlay row
+ * into MODEL_PROVIDERS here and the duplication cannot occur in-process. The fixture
+ * runs with a production deployment's environment — flat CUSTOM_PROVIDERS_JSON, the
+ * materialized overlay file a previous boot left, BOT_PROVIDER/BOT_MODEL pinned —
+ * and prints the list the page would render.
+ */
+describe("the production shape (fresh process)", () => {
+  const serverRoot = fileURLToPath(new URL("..", import.meta.url));
+  const ROUTER_ROW = {
+    label: "9Router",
+    base_url: "https://ninerouter-vzw3.onrender.com/v1",
+    key_variable: "NINEROUTER_API_KEY",
+    default_model: "auto",
+    api: "chat",
+  };
+
+  async function runProductionShape(extraEnv: Record<string, string>) {
+    const dir = await mkdtemp(join(tmpdir(), "openbot-providers-shape-"));
+    const overlayPath = join(dir, "providers.local.json");
+    await writeFile(
+      overlayPath,
+      JSON.stringify({ providers: { "9router": ROUTER_ROW }, bots: {} }),
+    );
+    const proc = Bun.spawn({
+      cmd: [
+        process.execPath,
+        "tests/fixtures/providers-list-production-shape.ts",
+      ],
+      cwd: serverRoot,
+      env: {
+        PATH: process.env.PATH ?? "",
+        CUSTOM_PROVIDERS_JSON: JSON.stringify({ "9router": ROUTER_ROW }),
+        CUSTOM_PROVIDERS_PATH: overlayPath,
+        NINEROUTER_API_KEY: "shape-secret",
+        ...extraEnv,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    try {
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      if (exitCode !== 0) {
+        throw new Error(`fixture exited ${exitCode}: ${stderr}`);
+      }
+      expect(stdout).not.toContain("shape-secret");
+      return JSON.parse(stdout.trim()) as {
+        providers: {
+          id: string;
+          source: string;
+          keyPresent: boolean;
+          isDefault: boolean;
+          defaultOrigin: string | null;
+        }[];
+        effectiveDefault: unknown;
+      };
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  test(
+    "env + materialized file: one 9router row, badged env, marked the default from env",
+    async () => {
+      const { providers, effectiveDefault } = await runProductionShape({
+        BOT_PROVIDER: "9router",
+        BOT_MODEL: "hermes",
+      });
+      expect(providers.map((row) => row.id)).toEqual([
+        "openai",
+        "anthropic",
+        "google",
+        "9router",
+      ]);
+      const router = providers.find((row) => row.id === "9router");
+      expect(router).toMatchObject({
+        source: "env",
+        keyPresent: true,
+        isDefault: true,
+        defaultOrigin: "env",
+      });
+      for (const builtin of providers.slice(0, 3)) {
+        expect(builtin).toMatchObject({ source: "builtin", isDefault: false });
+      }
+      expect(effectiveDefault).toEqual({
+        provider: "9router",
+        model: "hermes",
+        origin: "env",
+      });
+    },
+    30_000,
+  );
+
+  test(
+    "the same deployment without the env pin: one row, no default marked",
+    async () => {
+      const { providers, effectiveDefault } = await runProductionShape({});
+      expect(providers.filter((row) => row.id === "9router")).toHaveLength(1);
+      expect(providers.find((row) => row.id === "9router")).toMatchObject({
+        source: "env",
+        isDefault: false,
+        defaultOrigin: null,
+      });
+      expect(effectiveDefault).toBeNull();
+    },
+    30_000,
+  );
 });

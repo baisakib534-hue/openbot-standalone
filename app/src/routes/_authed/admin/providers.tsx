@@ -51,11 +51,14 @@ function Chip({ children }: { children: React.ReactNode }) {
   );
 }
 
-function DefaultChip() {
+function DefaultChip({ origin }: { origin: "db" | "env" | null }) {
   return (
     <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
       <IconStar className="size-3" />
       Default
+      {origin === "env" ? (
+        <span className="font-normal opacity-75">from env</span>
+      ) : null}
     </span>
   );
 }
@@ -113,7 +116,9 @@ function ProvidersPage() {
                 <ItemTitle>
                   <span className="flex items-center gap-2">
                     {row.label}
-                    {row.isDefault ? <DefaultChip /> : null}
+                    {row.isDefault ? (
+                      <DefaultChip origin={row.defaultOrigin} />
+                    ) : null}
                     <Chip>{providerSourceLabel(row.source)}</Chip>
                     <Chip>{row.keyPresent ? "Key set" : "No key"}</Chip>
                   </span>

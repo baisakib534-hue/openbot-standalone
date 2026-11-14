@@ -18,7 +18,9 @@ adds one runs entirely on its default provider.
 
 The page lists every provider the deployment knows — built-ins, environment and file rows,
 and app-added rows — each with its source badge, whether a key is set, and a **Default**
-badge on the active one.
+badge on the active one. Each provider appears once, badged by the source whose row wins
+(environment over app-added over file); a default pinned by `BOT_PROVIDER`/`BOT_MODEL`
+carries the badge too, marked **from env**.
 
 - **Add provider**: name, ID (suggested from the name), base URL, API key (a password field;
   or name the environment variable it arrives in instead), default model, and an optional
